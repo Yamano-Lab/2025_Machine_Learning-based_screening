@@ -1,0 +1,13 @@
+numpy
+tifffile
+matplotlib
+stardist
+csbdeep
+scikit-image
+tensorflow
+scikit-learn
+pandas
+seaborn
+umap-learn
+phate
+hdbscan
