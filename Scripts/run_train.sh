@@ -4,30 +4,27 @@
 # Training Configuration
 # ==========================================
 
-# PLEASE EDIT THE FOLLOWING PATHS BEFORE RUNNING
-# ==============================================
+# 入力画像のフォルダパス（最後にスラッシュをつけない）
+INPUT_DIR="./data/raw_images"
 
-# Input directory containing training images (WT)
-# Example: "/Users/username/data/WT_images"
-INPUT_DIR="/path/to/your/training_data_WT"
-
-# Output directory for saving models
-# Example: "/Users/username/data/models"
-# A timestamped subfolder will be created inside this directory
-OUTPUT_BASE_DIR="/path/to/your/model_output_dir"
+# 出力先フォルダのルートパス
+# （実行時に日付入りサブフォルダが作成されるようにPython側で処理しても良いが、
+#   ここでは分かりやすく引数として日付フォルダを指定する）
 DATE_STR=$(date "+%Y%m%d_%H%M")
-OUTPUT_DIR="${OUTPUT_BASE_DIR}/${DATE_STR}"
+OUTPUT_DIR="./results/Models/${DATE_STR}"
+
 
 # ==========================================
 # Execution
 # ==========================================
+
 
 echo "Starting Autoencoder Training..."
 echo "Input:  ${INPUT_DIR}"
 echo "Output: ${OUTPUT_DIR}"
 
 # Pythonスクリプトの実行
-python CAE_improved_modeltrain.py \
+python ./src/CAE_improved_modeltrain.py \
     --input_dir "${INPUT_DIR}" \
     --output_dir "${OUTPUT_DIR}"
 
