@@ -741,7 +741,7 @@ class MutantScreeningPipeline:
 
     def create_tsne_visualization(self, features, df, output_dir, color_map):
         print("  Generating t-SNE plot...")
-        embedding = TSNE(n_components=2, random_state=42, perplexity=30, n_iter=300).fit_transform(features)
+        embedding = TSNE(n_components=2, random_state=42, perplexity=30, max_iter=300).fit_transform(features)
         df['tSNE1'], df['tSNE2'] = embedding[:, 0], embedding[:, 1]
         self._plot_embedding(df, 'tSNE1', 'tSNE2', 't-SNE 2D Projection', os.path.join(output_dir, 'plot_tsne.png'), color_map)
 

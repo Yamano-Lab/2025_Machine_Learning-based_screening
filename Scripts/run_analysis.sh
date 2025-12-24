@@ -3,16 +3,16 @@
 # --- 設定項目 ---
 
 # モデルが保存されているディレクトリのパス
-MODEL_DIR="path/to/model"
+MODEL_DIR="results/Models/20251224_1722"
 
 # 解析対象のサンプル群が入っているルートフォルダのパス
-INPUT_DIR="path/to/input"
+INPUT_DIR="/Users/matsuokoujirou/Documents/Data/Screening/Abnormal_data/alldata"
 
 # WT（野生型）のデータが入っているフォルダのパス
-WT_PATH="path/to/wt"
+WT_PATH="data/raw_images"
 
 # 出力先ディレクトリ（指定しない場合は自動生成されます）
-OUTPUT_DIR="path/to/output"
+OUTPUT_DIR="results/analysis_results/1224_02"
 
 # --- 解析の実行 ---
 
@@ -31,7 +31,7 @@ fi
 # integrated_screening.py を実行します。
 # 各オプションの詳細は integrated_screening.py のヘルプを参照してください。
 # --umap を常時付与することで、FILEモード時でもUMAP解析を有効化します。
-python integrated_screening.py \
+python ./src/integrated_screening.py \
   --mode "$DETECTED_MODE" \
   --umap \
   --model_dir "$MODEL_DIR" \
