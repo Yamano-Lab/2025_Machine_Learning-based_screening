@@ -6,7 +6,7 @@ OUTPUT_DIR="./results/vae_vgg_output"
 EPOCHS=100
 BATCH_SIZE=32
 BETA=1.0    # Weight for KL Divergence
-GAMMA=0.0002   # Weight for VGG Perceptual Loss
+GAMMA=0.00002   # Weight for VGG Perceptual Loss
 RECON_WEIGHT=100.0 # Weight for Reconstruction Loss (MAE)
 
 # Help function
