@@ -2,12 +2,12 @@
 
 # Default parameters
 DATA_DIR="./data/raw_images"  # Change this to your actual data path
-OUTPUT_DIR="./results/vae_vgg_output"
+OUTPUT_DIR="./results/vae_vgg_output_0.05_1.0"
 EPOCHS=100
 BATCH_SIZE=32
 BETA=1.0    # Weight for KL Divergence
-GAMMA=0.00002   # Weight for VGG Perceptual Loss
-RECON_WEIGHT=100.0 # Weight for Reconstruction Loss (MAE)
+GAMMA=0.05   # Weight for VGG Perceptual Loss
+RECON_WEIGHT=1.0 # Weight for Reconstruction Loss (MAE)
 
 # Help function
 show_help() {
