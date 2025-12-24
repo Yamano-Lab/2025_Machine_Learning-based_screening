@@ -13,9 +13,9 @@ from stardist.models import StarDist2D
 # ==========================================
 # 設定（先ほどと同じパスを指定してください）
 # ==========================================
-INPUT_DIR = "/Users/matsuokoujirou/Documents/Data/imaging_data/Luca"
+INPUT_DIR = "data/raw_images"
 # モデルが保存されているフォルダ（日付のフォルダ）を指定してください
-MODEL_DIR = "/Users/matsuokoujirou/Documents/Data/imaging_data/Luca/Models/20251219_1622" 
+MODEL_DIR = "/Users/matsuokoujirou/Documents/YamanoLab_Scripts_Github/ML_based_screening/results/Models/20251224_1722" 
 # ↑ ここを実際の「日付フォルダ」の名前に書き換えてください！
 
 def main():
