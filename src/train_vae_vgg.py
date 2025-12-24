@@ -14,6 +14,7 @@ from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.layers import Input, Conv2D, Conv2DTranspose, Flatten, Dense, Reshape, Layer
 from tensorflow.keras.models import Model
 from tensorflow.keras.applications import VGG19
+from tensorflow.keras.applications.vgg19 import preprocess_input
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, Callback
 from tensorflow.keras.optimizers import Adam
 from sklearn.model_selection import train_test_split
@@ -35,12 +36,14 @@ class Sampling(Layer):
 
 # --- VAE Model with Custom Training Step ---
 class VAE(Model):
-    def __init__(self, encoder, decoder, beta=1.0, gamma=1.0, **kwargs):
+    def __init__(self, encoder, decoder, beta=1.0, gamma=0.05, recon_weight=100.0, **kwargs):
         super(VAE, self).__init__(**kwargs)
         self.encoder = encoder
         self.decoder = decoder
         self.beta = beta
         self.gamma = gamma
+        self.recon_weight = recon_weight
+        
         self.total_loss_tracker = tf.keras.metrics.Mean(name="total_loss")
         self.reconstruction_loss_tracker = tf.keras.metrics.Mean(name="recon_loss")
         self.kl_loss_tracker = tf.keras.metrics.Mean(name="kl_loss")
@@ -72,24 +75,31 @@ class VAE(Model):
             z_mean, z_log_var, z = self.encoder(data)
             reconstruction = self.decoder(z)
             
-            # 1. Reconstruction Loss (MAE)
-            recon_loss = tf.reduce_mean(tf.abs(data - reconstruction))
+            # 1. Reconstruction Loss (MAE) - Weighted
+            recon_loss = tf.reduce_mean(tf.abs(data - reconstruction)) * self.recon_weight
             
             # 2. KL Divergence Loss
             kl_loss = -0.5 * (1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var))
-            kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
+            kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1)) * self.beta
             
             # 3. Perceptual Loss (VGG)
-            # Convert grayscale (B, 64, 64, 1) to RGB (B, 64, 64, 3)
-            data_rgb = tf.image.grayscale_to_rgb(data)
-            recon_rgb = tf.image.grayscale_to_rgb(reconstruction)
+            # Preprocess for VGG: Scale to 0-255, 3 channels, specific preprocessing
+            data_scaled = data * 255.0
+            recon_scaled = reconstruction * 255.0
             
-            feat_true = self.vgg_feature_model(data_rgb)
-            feat_pred = self.vgg_feature_model(recon_rgb)
-            vgg_loss = tf.reduce_mean(tf.square(feat_true - feat_pred)) # MSE for features
+            data_rgb = tf.image.grayscale_to_rgb(data_scaled)
+            recon_rgb = tf.image.grayscale_to_rgb(recon_scaled)
+            
+            data_preprocessed = preprocess_input(data_rgb)
+            recon_preprocessed = preprocess_input(recon_rgb)
+            
+            feat_true = self.vgg_feature_model(data_preprocessed)
+            feat_pred = self.vgg_feature_model(recon_preprocessed)
+            
+            vgg_loss = tf.reduce_mean(tf.square(feat_true - feat_pred)) * self.gamma
             
             # Total Loss
-            total_loss = recon_loss + (self.beta * kl_loss) + (self.gamma * vgg_loss)
+            total_loss = recon_loss + kl_loss + vgg_loss
 
         grads = tape.gradient(total_loss, self.trainable_weights)
         self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
@@ -117,17 +127,29 @@ class VAE(Model):
         z_mean, z_log_var, z = self.encoder(data)
         reconstruction = self.decoder(z)
 
-        recon_loss = tf.reduce_mean(tf.abs(data - reconstruction))
-        kl_loss = -0.5 * (1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var))
-        kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
+        # 1. Reconstruction Loss (MAE) - Weighted
+        recon_loss = tf.reduce_mean(tf.abs(data - reconstruction)) * self.recon_weight
         
-        data_rgb = tf.image.grayscale_to_rgb(data)
-        recon_rgb = tf.image.grayscale_to_rgb(reconstruction)
-        feat_true = self.vgg_feature_model(data_rgb)
-        feat_pred = self.vgg_feature_model(recon_rgb)
-        vgg_loss = tf.reduce_mean(tf.square(feat_true - feat_pred))
+        # 2. KL Divergence Loss
+        kl_loss = -0.5 * (1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var))
+        kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1)) * self.beta
+        
+        # 3. Perceptual Loss (VGG)
+        data_scaled = data * 255.0
+        recon_scaled = reconstruction * 255.0
+        
+        data_rgb = tf.image.grayscale_to_rgb(data_scaled)
+        recon_rgb = tf.image.grayscale_to_rgb(recon_scaled)
+        
+        data_preprocessed = preprocess_input(data_rgb)
+        recon_preprocessed = preprocess_input(recon_rgb)
+        
+        feat_true = self.vgg_feature_model(data_preprocessed)
+        feat_pred = self.vgg_feature_model(recon_preprocessed)
+        
+        vgg_loss = tf.reduce_mean(tf.square(feat_true - feat_pred)) * self.gamma
 
-        total_loss = recon_loss + (self.beta * kl_loss) + (self.gamma * vgg_loss)
+        total_loss = recon_loss + kl_loss + vgg_loss
 
         self.total_loss_tracker.update_state(total_loss)
         self.reconstruction_loss_tracker.update_state(recon_loss)
@@ -142,12 +164,13 @@ class VAE(Model):
         }
 
 class VAETrainer:
-    def __init__(self, input_dir, output_dir, latent_dim=128, beta=0.001, gamma=0.1):
+    def __init__(self, input_dir, output_dir, latent_dim=128, beta=1.0, gamma=0.05, recon_weight=100.0):
         self.input_dir = input_dir
         self.output_dir = output_dir
         self.latent_dim = latent_dim
         self.beta = beta
         self.gamma = gamma
+        self.recon_weight = recon_weight
         os.makedirs(output_dir, exist_ok=True)
         self.setup_environment()
         
@@ -202,9 +225,17 @@ class VAETrainer:
     
     def create_dataset(self):
         print(f"=== Creating Dataset from: {self.input_dir} ===")
+        # Explicitly ignore warning
+        import logging
+        tf.get_logger().setLevel(logging.ERROR)
+        
         stardist_model = StarDist2D.from_pretrained('2D_versatile_fluo')
         file_paths = sorted(glob(os.path.join(self.input_dir, '*.tif')) + glob(os.path.join(self.input_dir, '*.tiff')))
         
+        if not file_paths:
+            print("No TIFF files found in input directory.")
+            return np.array([])
+
         all_cells = []
         for i, file_path in enumerate(file_paths):
             if i % 10 == 0: print(f"Processing {i+1}/{len(file_paths)}...")
@@ -250,7 +281,7 @@ class VAETrainer:
     def train(self, epochs=100, batch_size=32):
         cells = self.create_dataset()
         if len(cells) == 0:
-            print("No cells found. Exiting.")
+            print("No cells found or generated. Exiting.")
             return
 
         # Prepare Data
@@ -264,7 +295,7 @@ class VAETrainer:
         
         # Build VAE
         encoder, decoder = self.build_models()
-        vae = VAE(encoder, decoder, beta=self.beta, gamma=self.gamma)
+        vae = VAE(encoder, decoder, beta=self.beta, gamma=self.gamma, recon_weight=self.recon_weight)
         
         vae.compile(optimizer=Adam(learning_rate=0.0005))
         
@@ -274,7 +305,7 @@ class VAETrainer:
             ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6)
         ]
         
-        print(f"=== Starting VAE Training (Beta={self.beta}, Gamma={self.gamma}) ===")
+        print(f"=== Starting VAE Training (Beta={self.beta}, Gamma={self.gamma}, Recon_Weight={self.recon_weight}) ===")
         history = vae.fit(
             datagen.flow(X_train, X_train, batch_size=batch_size),
             steps_per_epoch=len(X_train) // batch_size,
@@ -290,9 +321,7 @@ class VAETrainer:
         # Save Models
         encoder.save(os.path.join(self.output_dir, 'vae_encoder.keras'))
         decoder.save(os.path.join(self.output_dir, 'vae_decoder.keras'))
-        # Note: Saving subclassed VAE entire model can be tricky in Keras.
-        # We usually save weights or just re-instantiate.
-        # Trying standard save:
+        
         try:
             vae.save_weights(os.path.join(self.output_dir, 'vae_weights.h5'))
         except Exception as e:
@@ -348,7 +377,8 @@ def main():
     parser.add_argument('--epochs', type=int, default=50, help="Number of training epochs")
     parser.add_argument('--batch_size', type=int, default=32, help="Batch size")
     parser.add_argument('--beta', type=float, default=1.0, help="Weight for KL Divergence")
-    parser.add_argument('--gamma', type=float, default=0.1, help="Weight for VGG Perceptual Loss")
+    parser.add_argument('--gamma', type=float, default=0.05, help="Weight for VGG Perceptual Loss")
+    parser.add_argument('--recon_weight', type=float, default=100.0, help="Weight for Reconstruction Loss (MAE)")
     
     args = parser.parse_args()
     
@@ -356,7 +386,8 @@ def main():
         input_dir=args.input_dir,
         output_dir=args.output_dir,
         beta=args.beta,
-        gamma=args.gamma
+        gamma=args.gamma,
+        recon_weight=args.recon_weight
     )
     
     trainer.train(epochs=args.epochs, batch_size=args.batch_size)
