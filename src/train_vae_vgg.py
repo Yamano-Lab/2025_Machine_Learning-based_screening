@@ -36,7 +36,7 @@ class Sampling(Layer):
 
 # --- VAE Model with Custom Training Step ---
 class VAE(Model):
-    def __init__(self, encoder, decoder, beta=1.0, gamma=0.01, recon_weight=100.0, **kwargs):
+    def __init__(self, encoder, decoder, beta=1.0, gamma=0.0002, recon_weight=100.0, **kwargs):
         super(VAE, self).__init__(**kwargs)
         self.encoder = encoder
         self.decoder = decoder
@@ -75,14 +75,16 @@ class VAE(Model):
             z_mean, z_log_var, z = self.encoder(data)
             reconstruction = self.decoder(z)
             
-            # 1. Reconstruction Loss (MAE) - Weighted
-            recon_loss = tf.reduce_mean(tf.abs(data - reconstruction)) * self.recon_weight
+            # --- Loss Calculation ---
             
-            # 2. KL Divergence Loss
-            kl_loss = -0.5 * (1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var))
-            kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1)) * self.beta
+            # 1. Reconstruction Loss (MAE) - Raw calculation
+            recon_loss_raw = tf.reduce_mean(tf.abs(data - reconstruction))
             
-            # 3. Perceptual Loss (VGG)
+            # 2. KL Divergence Loss - Raw calculation
+            kl_loss_raw = -0.5 * (1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var))
+            kl_loss_raw = tf.reduce_mean(tf.reduce_sum(kl_loss_raw, axis=1))
+            
+            # 3. Perceptual Loss (VGG) - Raw calculation
             # Preprocess for VGG: Scale to 0-255, 3 channels, specific preprocessing
             data_scaled = data * 255.0
             recon_scaled = reconstruction * 255.0
@@ -96,18 +98,24 @@ class VAE(Model):
             feat_true = self.vgg_feature_model(data_preprocessed)
             feat_pred = self.vgg_feature_model(recon_preprocessed)
             
-            vgg_loss = tf.reduce_mean(tf.square(feat_true - feat_pred)) * self.gamma
+            vgg_loss_raw = tf.reduce_mean(tf.square(feat_true - feat_pred))
             
-            # Total Loss
-            total_loss = recon_loss + kl_loss + vgg_loss
+            # Total Loss (Weighted Sum)
+            total_loss = (self.recon_weight * recon_loss_raw) + \
+                         (self.beta * kl_loss_raw) + \
+                         (self.gamma * vgg_loss_raw)
 
         grads = tape.gradient(total_loss, self.trainable_weights)
         self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
         
+        # Track raw or weighted? Usually track weighted components to see contribution, or raw to see physical meaning.
+        # Let's track the weighted contributions as per Keras standard logic usually, but here raw is more informative if we know weights.
+        # However, to be consistent with 'total_loss', let's track the terms that sum to it.
+        
         self.total_loss_tracker.update_state(total_loss)
-        self.reconstruction_loss_tracker.update_state(recon_loss)
-        self.kl_loss_tracker.update_state(kl_loss)
-        self.vgg_loss_tracker.update_state(vgg_loss)
+        self.reconstruction_loss_tracker.update_state(recon_loss_raw) # Tracking raw MAE for interpretability
+        self.kl_loss_tracker.update_state(kl_loss_raw) # Tracking raw KL
+        self.vgg_loss_tracker.update_state(vgg_loss_raw) # Tracking raw VGG MSE
         
         return {
             "loss": self.total_loss_tracker.result(),
@@ -127,34 +135,33 @@ class VAE(Model):
         z_mean, z_log_var, z = self.encoder(data)
         reconstruction = self.decoder(z)
 
-        # 1. Reconstruction Loss (MAE) - Weighted
-        recon_loss = tf.reduce_mean(tf.abs(data - reconstruction)) * self.recon_weight
+        # Raw calculations
+        recon_loss_raw = tf.reduce_mean(tf.abs(data - reconstruction))
         
-        # 2. KL Divergence Loss
-        kl_loss = -0.5 * (1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var))
-        kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1)) * self.beta
+        kl_loss_raw = -0.5 * (1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var))
+        kl_loss_raw = tf.reduce_mean(tf.reduce_sum(kl_loss_raw, axis=1))
         
-        # 3. Perceptual Loss (VGG)
         data_scaled = data * 255.0
         recon_scaled = reconstruction * 255.0
-        
         data_rgb = tf.image.grayscale_to_rgb(data_scaled)
         recon_rgb = tf.image.grayscale_to_rgb(recon_scaled)
-        
         data_preprocessed = preprocess_input(data_rgb)
         recon_preprocessed = preprocess_input(recon_rgb)
         
         feat_true = self.vgg_feature_model(data_preprocessed)
         feat_pred = self.vgg_feature_model(recon_preprocessed)
         
-        vgg_loss = tf.reduce_mean(tf.square(feat_true - feat_pred)) * self.gamma
+        vgg_loss_raw = tf.reduce_mean(tf.square(feat_true - feat_pred))
 
-        total_loss = recon_loss + kl_loss + vgg_loss
+        # Total Loss
+        total_loss = (self.recon_weight * recon_loss_raw) + \
+                     (self.beta * kl_loss_raw) + \
+                     (self.gamma * vgg_loss_raw)
 
         self.total_loss_tracker.update_state(total_loss)
-        self.reconstruction_loss_tracker.update_state(recon_loss)
-        self.kl_loss_tracker.update_state(kl_loss)
-        self.vgg_loss_tracker.update_state(vgg_loss)
+        self.reconstruction_loss_tracker.update_state(recon_loss_raw)
+        self.kl_loss_tracker.update_state(kl_loss_raw)
+        self.vgg_loss_tracker.update_state(vgg_loss_raw)
 
         return {
             "loss": self.total_loss_tracker.result(),
@@ -164,7 +171,7 @@ class VAE(Model):
         }
 
 class VAETrainer:
-    def __init__(self, input_dir, output_dir, latent_dim=128, beta=1.0, gamma=0.01, recon_weight=100.0):
+    def __init__(self, input_dir, output_dir, latent_dim=128, beta=1.0, gamma=0.0002, recon_weight=100.0):
         self.input_dir = input_dir
         self.output_dir = output_dir
         self.latent_dim = latent_dim
@@ -306,8 +313,22 @@ class VAETrainer:
         ]
         
         print(f"=== Starting VAE Training (Beta={self.beta}, Gamma={self.gamma}, Recon_Weight={self.recon_weight}) ===")
+
+        # Create generator
+        train_generator = datagen.flow(X_train, X_train, batch_size=batch_size)
+        
+        # (Optional but recommended safety) Verify generator and reset
+        try:
+            sample_batch = next(train_generator)
+            print(f"Generator check: Batch shape {sample_batch[0].shape}")
+        except Exception as e:
+            print(f"Generator check failed: {e}")
+
+        # RESET GENERATOR to avoid "ran out of data" error
+        train_generator = datagen.flow(X_train, X_train, batch_size=batch_size)
+
         history = vae.fit(
-            datagen.flow(X_train, X_train, batch_size=batch_size),
+            train_generator,
             steps_per_epoch=len(X_train) // batch_size,
             epochs=epochs,
             validation_data=(X_val, X_val),
@@ -377,7 +398,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=50, help="Number of training epochs")
     parser.add_argument('--batch_size', type=int, default=32, help="Batch size")
     parser.add_argument('--beta', type=float, default=1.0, help="Weight for KL Divergence")
-    parser.add_argument('--gamma', type=float, default=0.01, help="Weight for VGG Perceptual Loss")
+    parser.add_argument('--gamma', type=float, default=0.0002, help="Weight for VGG Perceptual Loss")
     parser.add_argument('--recon_weight', type=float, default=100.0, help="Weight for Reconstruction Loss (MAE)")
     
     args = parser.parse_args()

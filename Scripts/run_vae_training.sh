@@ -6,7 +6,8 @@ OUTPUT_DIR="./results/vae_vgg_output"
 EPOCHS=100
 BATCH_SIZE=32
 BETA=1.0    # Weight for KL Divergence
-GAMMA=0.1   # Weight for VGG Perceptual Loss
+GAMMA=0.0002   # Weight for VGG Perceptual Loss
+RECON_WEIGHT=100.0 # Weight for Reconstruction Loss (MAE)
 
 # Help function
 show_help() {
@@ -19,6 +20,7 @@ show_help() {
     echo "  -b, --batch_size INT    Batch size (default: $BATCH_SIZE)"
     echo "  --beta FLOAT            Weight for KL Divergence (default: $BETA)"
     echo "  --gamma FLOAT           Weight for VGG Perceptual Loss (default: $GAMMA)"
+    echo "  --recon_weight FLOAT    Weight for Reconstruction Loss (default: $RECON_WEIGHT)"
     echo "  -h, --help              Show this help message"
 }
 
@@ -50,6 +52,10 @@ while [[ $# -gt 0 ]]; do
         GAMMA="$2"
         shift 2
         ;;
+        --recon_weight)
+        RECON_WEIGHT="$2"
+        shift 2
+        ;;
         -h|--help)
         show_help
         exit 0
@@ -78,6 +84,7 @@ echo "Epochs: $EPOCHS"
 echo "Batch Size: $BATCH_SIZE"
 echo "Beta (KL Weight): $BETA"
 echo "Gamma (VGG Weight): $GAMMA"
+echo "Recon Weight: $RECON_WEIGHT"
 echo "========================================================"
 
 # Check if python script exists
@@ -93,7 +100,8 @@ python "$PYTHON_SCRIPT" \
     --epochs $EPOCHS \
     --batch_size $BATCH_SIZE \
     --beta $BETA \
-    --gamma $GAMMA
+    --gamma $GAMMA \
+    --recon_weight $RECON_WEIGHT
 
 # Check exit code
 if [ $? -eq 0 ]; then
