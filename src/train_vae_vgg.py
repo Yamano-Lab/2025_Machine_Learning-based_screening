@@ -36,7 +36,7 @@ class Sampling(Layer):
 
 # --- VAE Model with Custom Training Step ---
 class VAE(Model):
-    def __init__(self, encoder, decoder, beta=1.0, gamma=0.05, recon_weight=100.0, **kwargs):
+    def __init__(self, encoder, decoder, beta=1.0, gamma=0.01, recon_weight=100.0, **kwargs):
         super(VAE, self).__init__(**kwargs)
         self.encoder = encoder
         self.decoder = decoder
@@ -164,7 +164,7 @@ class VAE(Model):
         }
 
 class VAETrainer:
-    def __init__(self, input_dir, output_dir, latent_dim=128, beta=1.0, gamma=0.05, recon_weight=100.0):
+    def __init__(self, input_dir, output_dir, latent_dim=128, beta=1.0, gamma=0.01, recon_weight=100.0):
         self.input_dir = input_dir
         self.output_dir = output_dir
         self.latent_dim = latent_dim
@@ -377,7 +377,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=50, help="Number of training epochs")
     parser.add_argument('--batch_size', type=int, default=32, help="Batch size")
     parser.add_argument('--beta', type=float, default=1.0, help="Weight for KL Divergence")
-    parser.add_argument('--gamma', type=float, default=0.05, help="Weight for VGG Perceptual Loss")
+    parser.add_argument('--gamma', type=float, default=0.01, help="Weight for VGG Perceptual Loss")
     parser.add_argument('--recon_weight', type=float, default=100.0, help="Weight for Reconstruction Loss (MAE)")
     
     args = parser.parse_args()
