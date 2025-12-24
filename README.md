@@ -6,6 +6,12 @@
 ## 1. ファイル構成
 ```text
 ML_based_screening/
+├── data/                     # 学習・解析用データ置き場
+│   └── raw_images/           # 原画像データ
+├── models/                   # 学習済みモデルの保存先
+├── results/                  # 学習結果の出力先
+│   └── vae_vgg_output/       # VAE学習の結果など
+├── screening_results/        # スクリーニング解析結果の出力先
 ├── src/                      # Pythonのソースコード（コアロジック）
 │   ├── __init__.py           # パッケージ認識用（通常は触りません）
 │   ├── CAE_improved_modeltrain.py  # CAEモデルの学習
