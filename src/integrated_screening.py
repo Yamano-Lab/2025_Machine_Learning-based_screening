@@ -28,9 +28,11 @@ try:
 except ImportError:
     phate = None
 try:
-    import hdbscan
+    import scanpy as sc
+    import anndata
+    SCANPY_AVAILABLE = True
 except ImportError:
-    hdbscan = None
+    SCANPY_AVAILABLE = False
 
 
 class MutantScreeningPipeline:
@@ -145,19 +147,70 @@ class MutantScreeningPipeline:
             return []
 
     def compute_anomaly_scores(self, cell_images):
-        """細胞画像のリストから異常関連スコアを計算する"""
+        """細胞画像のリストから異常関連スコアを計算する (Test-Time Augmentation implemented)"""
         if len(cell_images) == 0: return {}
-        X = np.expand_dims(np.array(cell_images), axis=-1).astype('float32')
-        reconstructed = self.autoencoder.predict(X, verbose=0)
-        mse = np.mean(np.square(X - reconstructed), axis=(1, 2, 3))
-        encoded_features = self.encoder.predict(X, verbose=0)
-        encoded_flat = encoded_features.reshape(len(encoded_features), -1)
-        encoded_scaled = self.scaler.transform(encoded_flat)
+        
+        N = len(cell_images)
+        # Original images: (N, 64, 64)
+        X_orig = np.array(cell_images)
+        
+        # 1. Generate 4 rotated versions for each image
+        # Rotations: 0, 90, 180, 270 degrees
+        X_0 = X_orig
+        X_90 = np.rot90(X_orig, k=1, axes=(1, 2))
+        X_180 = np.rot90(X_orig, k=2, axes=(1, 2))
+        X_270 = np.rot90(X_orig, k=3, axes=(1, 2))
+        
+        # Stack all: (N * 4, 64, 64)
+        X_aug = np.concatenate([X_0, X_90, X_180, X_270], axis=0)
+        
+        # Add channel dimension: (N * 4, 64, 64, 1)
+        X_aug = np.expand_dims(X_aug, axis=-1).astype('float32')
+        
+        # 2. Batch processing to avoid OOM
+        batch_size = 32
+        mse_list = []
+        features_list = []
+        
+        for i in range(0, len(X_aug), batch_size):
+            batch_X = X_aug[i:i + batch_size]
+            
+            # Reconstruction
+            reconstructed = self.autoencoder.predict(batch_X, verbose=0)
+            batch_mse = np.mean(np.square(batch_X - reconstructed), axis=(1, 2, 3))
+            mse_list.append(batch_mse)
+            
+            # Encoder features
+            encoded_features = self.encoder.predict(batch_X, verbose=0)
+            encoded_flat = encoded_features.reshape(len(encoded_features), -1)
+            features_list.append(encoded_flat)
+            
+        all_mse = np.concatenate(mse_list, axis=0) # (N * 4,)
+        all_features = np.concatenate(features_list, axis=0) # (N * 4, feature_dim)
+        
+        # 3. Pooling (Average) back to N cells
+        # Reshape to (4, N, ...) then transpose to (N, 4, ...) implies we stacked [N_0, N_90, ...]
+        # Actually we concatenated [X_0, X_90, ...], so first N are 0deg, next N are 90deg...
+        
+        # Reshape to (4, N)
+        all_mse_reshaped = all_mse.reshape(4, N).T # (N, 4)
+        # Reshape to (4, N, feature_dim)
+        all_features_reshaped = all_features.reshape(4, N, -1).transpose(1, 0, 2) # (N, 4, feature_dim)
+        
+        # Compute mean over rotations
+        final_mse = np.mean(all_mse_reshaped, axis=1) # (N,)
+        final_features_mean = np.mean(all_features_reshaped, axis=1) # (N, feature_dim)
+        
+        # 4. Standard PCA & Anomaly Detection pipeline
+        encoded_scaled = self.scaler.transform(final_features_mean)
         encoded_pca = self.pca.transform(encoded_scaled)
         predictions = self.detector_conservative.predict(encoded_pca)
         anomaly_scores = -self.detector_conservative.decision_function(encoded_pca)
+        
         return {
-            'mse': mse, 'predictions': predictions, 'anomaly_scores': anomaly_scores,
+            'mse': final_mse, 
+            'predictions': predictions, 
+            'anomaly_scores': anomaly_scores,
             'anomaly_rate': np.sum(predictions == -1) / len(predictions),
             'features_pca': encoded_pca
         }
@@ -363,7 +416,7 @@ class MutantScreeningPipeline:
 
             if run_quantitative:
                 self.calculate_distribution_distances(df_detailed, output_dir)
-                self.perform_clustering_analysis(all_features_pca, analysis_df, output_dir, color_map)
+                self.perform_clustering_analysis(all_features_pca, analysis_df, output_dir, color_map, df_detailed)
 
         print(f"File mode processing complete. Results are in {output_dir}")
 
@@ -550,7 +603,7 @@ class MutantScreeningPipeline:
 
             if run_quantitative:
                 self.calculate_distribution_distances(df_detailed, output_dir)
-                self.perform_clustering_analysis(all_features_pca, analysis_df, output_dir, color_map)
+                self.perform_clustering_analysis(all_features_pca, analysis_df, output_dir, color_map, df_detailed)
         
         print(f"Folder mode processing complete. Results are in {output_dir}")
 
@@ -795,22 +848,45 @@ class MutantScreeningPipeline:
         df_dist.to_csv(os.path.join(output_dir, 'quantitative_distribution_distances.csv'))
         print(f"  Saved distribution distances to {os.path.join(output_dir, 'quantitative_distribution_distances.csv')}")
 
-    def perform_clustering_analysis(self, features, df, output_dir, color_map):
-        if hdbscan is None:
-            print("  Skipping Clustering: 'hdbscan' library not installed.")
+    def perform_clustering_analysis(self, features, df, output_dir, color_map, df_detailed):
+        if not SCANPY_AVAILABLE:
+            print("  Skipping Clustering: 'scanpy' or 'anndata' library not installed.")
             return
-        print("  Performing HDBSCAN clustering...")
-        clusterer = hdbscan.HDBSCAN(min_cluster_size=15, min_samples=5)
-        df['cluster'] = clusterer.fit_predict(features)
         
+        print("  Performing Leiden clustering (Scanpy)...")
+        # 1. Create AnnData object
+        adata = anndata.AnnData(X=features)
+        
+        # 2. Compute neighbors
+        # Use PCA features directly as 'X' (or we could store in obsm but using X is simpler here)
+        sc.pp.neighbors(adata, n_neighbors=15, use_rep='X')
+        
+        # 3. Leiden clustering
+        resolution = 0.5
+        sc.tl.leiden(adata, resolution=resolution)
+        
+        # 4. Store cluster labels back to df
+        # Convert to int to match previous logic or keep as category string
+        df['cluster'] = adata.obs['leiden'].values
+        
+        # Sync cluster labels to df_detailed (assuming same order)
+        if len(df) == len(df_detailed):
+             df_detailed['cluster'] = df['cluster'].values
+        else:
+             print("Warning: df and df_detailed length mismatch. Skipping cluster sync.")
+
+        # --- Visualization ---
+        
+        # Composition analysis
         composition = df.groupby(['sample', 'cluster']).size().unstack(fill_value=0)
         composition_perc = composition.div(composition.sum(axis=1), axis=0) * 100
         composition_perc.to_csv(os.path.join(output_dir, 'quantitative_clustering_composition.csv'))
         
+        # Plot composition heatmap
         plt.figure(figsize=(12, 8))
         sns.heatmap(composition_perc, annot=True, fmt='.1f', cmap='viridis')
-        plt.title('Cluster Composition (%) by Sample')
-        plt.xlabel('Cluster ID (-1 = Outliers)')
+        plt.title(f'Cluster Composition (%) by Sample (Leiden res={resolution})')
+        plt.xlabel('Cluster ID')
         plt.ylabel('Sample')
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, 'quantitative_clustering_heatmap.png'), dpi=300, bbox_inches='tight')
@@ -823,40 +899,52 @@ class MutantScreeningPipeline:
             diff_df = composition_perc.subtract(wt_comp, axis=1)
             
             plt.figure(figsize=(12, 8))
-            # cmap='PuOr' for colorblind friendly divergent (Purple-Orange)
+            # cmap='PuOr' for colorblind friendly divergent (Purple-Orange), center=0
             sns.heatmap(diff_df, annot=True, fmt='.1f', cmap='PuOr', center=0)
             plt.title('Cluster Composition Difference (Sample - WT)')
-            plt.xlabel('Cluster ID (-1 = Outliers)')
+            plt.xlabel('Cluster ID')
             plt.ylabel('Sample')
             plt.tight_layout()
             plt.savefig(os.path.join(output_dir, 'quantitative_clustering_diff_heatmap.png'), dpi=300, bbox_inches='tight')
             plt.close()
 
+        # Plot UMAP colored by cluster if UMAP data exists in df
         if 'UMAP1' in df.columns:
             plt.figure(figsize=(10, 8))
-            unique_clusters = sorted(df['cluster'].unique())
+            # Ensure clusters are categorical for proper coloring
+            unique_clusters = sorted(df['cluster'].unique(), key=lambda x: int(x) if str(x).isdigit() else x)
             num_clusters = len(unique_clusters)
-            # Use a categorical palette, Okabe-Ito might be too small if many clusters, but generally safe.
-            # Fallback to viridis or tab20 if clusters > 8, but user requested global style.
-            # Let's stick to sns default or customized if small.
-            if num_clusters <= 8:
-                 palette = sns.color_palette(self.okabe_ito, num_clusters)
+            
+            # Use tab10 or Okabe-Ito if small number, else tab20
+            if num_clusters <= 10:
+                palette = sns.color_palette("tab10", num_clusters)
             else:
-                 palette = sns.color_palette("tab20", num_clusters)
-
-            cluster_colors = [c for c in unique_clusters if c != -1]
-            color_map_cluster = {cluster: palette[i] for i, cluster in enumerate(cluster_colors)}
-            if -1 in unique_clusters:
-                color_map_cluster[-1] = (0.5, 0.5, 0.5)
-
-            sns.scatterplot(x='UMAP1', y='UMAP2', hue='cluster', style='sample', data=df, palette=color_map_cluster, alpha=0.7)
-            plt.title('UMAP Projection with HDBSCAN Clusters')
+                palette = sns.color_palette("tab20", num_clusters)
+            
+            sns.scatterplot(x='UMAP1', y='UMAP2', hue='cluster', style='sample', data=df, palette=palette, alpha=0.7)
+            plt.title('UMAP Projection with Leiden Clusters')
             plt.legend(title='Cluster ID', bbox_to_anchor=(1.05, 1), loc='upper left')
             plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, 'plot_umap_hdbscan_clusters.png'), dpi=300, bbox_inches='tight')
+            plt.savefig(os.path.join(output_dir, 'plot_umap_leiden_clusters.png'), dpi=300, bbox_inches='tight')
             plt.close()
 
-        wt_name = next((s for s in composition_perc.index if s.upper() == 'WT'), None)
+            # Option: Use Scanpy's UMAP plotting if we calculate UMAP within Scanpy too
+            # But here we already have UMAP coords in df. We can inject them into adata.obsm['X_umap']
+            adata.obsm['X_umap'] = df[['UMAP1', 'UMAP2']].values
+            # Create Scanpy UMAP plot
+            try:
+                # Scanpy settings for saving
+                sc.settings.figdir = output_dir
+                sc.set_figure_params(dpi=300, facecolor='white')
+                
+                sc.pl.umap(adata, color='leiden', show=False, title='Leiden Clusters (Scanpy Style)', save='_scanpy_leiden.png')
+                # Rename or move if needed, scanpy saves as "umap_scanpy_leiden.png" usually
+                # We'll just let it save as configured.
+                print(f"  Saved Scanpy-style UMAP plot to {output_dir}")
+            except Exception as e:
+                print(f"  Could not generate Scanpy UMAP plot: {e}")
+
+        # WT cluster distribution bar plot
         if wt_name:
             wt_composition = composition_perc.loc[wt_name]
             plt.figure(figsize=(8, 6))
@@ -870,7 +958,114 @@ class MutantScreeningPipeline:
             plt.close()
             
         print(f"  Saved clustering results to {output_dir}")
+        
+        # Generate Cluster Gallery
+        self._generate_cluster_gallery(df_detailed, output_dir)
 
+    def _generate_cluster_gallery(self, df_detailed, output_dir):
+        """
+        Generate a gallery of random WT cells for each cluster.
+        """
+        if 'cluster' not in df_detailed.columns:
+            print("  Skipping cluster gallery: 'cluster' column not found in detailed results.")
+            return
+
+        print("  Generating Cluster Cell Gallery...")
+        
+        # Use simple heuristic for 'WT' if 'is_wt' column is missing or tricky
+        # But we usually have 'sample_name' with 'WT'
+        wt_df = df_detailed[df_detailed['sample_name'].str.contains('WT', case=False, na=False)]
+        
+        if wt_df.empty:
+            print("  Skipping cluster gallery: No WT cells found.")
+            return
+
+        unique_clusters = sorted(wt_df['cluster'].unique(), key=lambda x: int(x) if str(x).isdigit() else x)
+        
+        for cluster_id in unique_clusters:
+            cluster_cells = wt_df[wt_df['cluster'] == cluster_id]
+            if cluster_cells.empty:
+                continue
+            
+            # Sample up to 10 cells
+            n_samples = min(10, len(cluster_cells))
+            sampled_cells = cluster_cells.sample(n=n_samples, random_state=42)
+            
+            # Collect images. Optimize by file reading.
+            # Group by file path to minimize opens
+            images_to_plot = [] # List of (image, score)
+            
+            # Sort by file path for potential caching efficiency (though simple loop here)
+            # Actually, to maintain random order in plot, we just fetch.
+            # But let's group by file first to read efficient
+            
+            file_groups = sampled_cells.groupby('file_path')
+            
+            # Temporary storage: {index_in_sampled -> image_data}
+            temp_images = {}
+            
+            for f_path, group in file_groups:
+                try:
+                    # We need to load the file once
+                    # Then extract indices
+                    # But our 'extract_quality_cells' returns ALL cells in a list.
+                    # We need the index.
+                    
+                    # NOTE: 'extract_quality_cells' is expensive if file is huge.
+                    # But we have no random access reader implemented.
+                    # We must assume files are reasonably small or accept the cost.
+                    
+                    # To optimize: read all needed cells from this file
+                    needed_indices = []
+                    for idx, row in group.iterrows():
+                        # Use local_idx if available, else cell_id
+                        cell_idx = int(row.get('local_idx', row.get('cell_id')))
+                        needed_indices.append((idx, cell_idx)) # (dataframe_index, cell_index_in_file)
+                    
+                    # Read file
+                    # We don't want contrast enhancement for gallery usually, or maybe we do?
+                    # "Raw images" are better for morphology check usually.
+                    # Let's use raw (index 0 of tuple)
+                    cells_data = self.extract_quality_cells(f_path, enhance_contrast=False)
+                    
+                    for df_idx, c_idx in needed_indices:
+                        if c_idx < len(cells_data):
+                            raw_img = cells_data[c_idx][0]
+                            # Store with df_idx to restore order if needed, or just append
+                            temp_images[df_idx] = raw_img
+                        else:
+                            print(f"Warning: Cell index {c_idx} out of bounds for {f_path}")
+                            
+                except Exception as e:
+                    print(f"Error reading file for gallery {f_path}: {e}")
+
+            # Reconstruct list based on sampled order
+            final_images = []
+            final_scores = []
+            
+            for idx, row in sampled_cells.iterrows():
+                if idx in temp_images:
+                    final_images.append(temp_images[idx])
+                    final_scores.append(row['anomaly_score'])
+
+            if not final_images:
+                continue
+
+            # Plot
+            n_cols = len(final_images)
+            fig, axes = plt.subplots(1, n_cols, figsize=(n_cols * 2, 2.5))
+            if n_cols == 1: axes = [axes]
+            
+            for i, ax in enumerate(axes):
+                ax.imshow(final_images[i], cmap='gray')
+                ax.axis('off')
+                ax.set_title(f"{final_scores[i]:.1f}", fontsize=10)
+            
+            plt.suptitle(f"Cluster {cluster_id} (WT samples, n={len(cluster_cells)})", fontsize=14)
+            plt.tight_layout()
+            save_name = f"cluster_{cluster_id}_wt_gallery.png"
+            plt.savefig(os.path.join(output_dir, save_name), dpi=300, bbox_inches='tight')
+            plt.close()
 
 def main():
     parser = argparse.ArgumentParser(description="Integrated Mutant Screening Pipeline.", formatter_class=argparse.RawTextHelpFormatter)
