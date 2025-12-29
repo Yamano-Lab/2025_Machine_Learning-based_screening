@@ -45,6 +45,19 @@ class MutantScreeningPipeline:
 
     def __init__(self, model_dir):
         self.model_dir = model_dir
+        
+        # --- Visual Style Setup (Okabe-Ito & Publication Ready) ---
+        # Okabe-Ito Palette (Colorblind friendly)
+        self.okabe_ito = ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000"]
+        sns.set_palette(self.okabe_ito)
+        sns.set_style("ticks")
+        plt.rcParams.update({
+            'font.size': 12,
+            'axes.spines.top': False,
+            'axes.spines.right': False,
+            'figure.autolayout': False
+        })
+        
         self.load_trained_models()
 
     def load_trained_models(self):
@@ -91,7 +104,7 @@ class MutantScreeningPipeline:
     def extract_quality_cells(self, image_path, enhance_contrast=True):
         """単一のTIF画像から品質基準を満たす細胞画像を抽出する
         Returns:
-            list of tuples: [(raw_cell, preprocessed_cell), ...]
+            list of tuples: [(raw_cell, preprocessed_cell), ...] 
         """
         try:
             image = tiff.imread(image_path)
@@ -231,9 +244,6 @@ class MutantScreeningPipeline:
                 should_load_wt = True
                 print(f"  WT not found in input files. Loading additional WT data from: {wt_path}")
             else:
-                 # Check if wt_path is external to the input files being processed
-                 # For simplicity in file mode, if 'WT' is not one of the keys, we load it.
-                 # If 'WT' is in keys, we assume it's covered.
                  pass
 
             if should_load_wt:
@@ -260,7 +270,6 @@ class MutantScreeningPipeline:
                     analysis_data['is_anomaly'].extend(wt_scores['predictions'] == -1)
                     analysis_data['mse'].extend(wt_scores['mse'])
                     
-                    # Update summary/detailed for plots if WT wasn't in original inputs
                     if 'WT' not in summary_results:
                          summary_results['WT'] = {
                             'sample_name': 'WT', 
@@ -275,7 +284,7 @@ class MutantScreeningPipeline:
                             detailed_results.append({
                                 'sample_name': 'WT', 
                                 'file_path': f_path, 
-                                'cell_id': i, # Use global index for file mode or local
+                                'cell_id': i, 
                                 'anomaly_score': score, 
                                 'mse': mse
                             })
@@ -290,7 +299,6 @@ class MutantScreeningPipeline:
         
         # --- Run XAI Analysis ---
         print("  Running XAI analysis...")
-        # 1. WT Reference
         wt_name = next((s for s in summary_results.keys() if 'WT' == s.upper() or 'WT' in s.upper()), None)
         if wt_name:
             wt_rows = df_detailed[df_detailed['sample_name'] == wt_name]
@@ -302,7 +310,6 @@ class MutantScreeningPipeline:
                 for rank, (_, row) in enumerate(median_candidates.iterrows()):
                     try:
                         w_path = row['file_path']
-                        # In file mode, cell_id is the index in the file
                         w_idx = int(row['cell_id'])
                         w_data = self.extract_quality_cells(w_path, enhance_contrast=True)
                         if w_idx < len(w_data):
@@ -340,7 +347,8 @@ class MutantScreeningPipeline:
             analysis_df = pd.DataFrame({'sample': analysis_data['sample_name'], 'is_anomaly': analysis_data['is_anomaly']})
             
             samples = sorted(analysis_df['sample'].unique())
-            palette = sns.color_palette("tab10", len(samples))
+            # Use Okabe-Ito (cycling if needed)
+            palette = sns.color_palette(self.okabe_ito, len(samples))
             color_map = dict(zip(samples, palette))
 
             if generate_umap:
@@ -397,7 +405,6 @@ class MutantScreeningPipeline:
 
         # --- Ensure WT is included in analysis_data if available ---
         if (generate_umap or run_extra_viz or run_quantitative) and wt_path:
-            # Check if WT was already processed from the input folders
             wt_in_folders = False
             wt_folder_path = None
             for name, path in folders_dict.items():
@@ -406,16 +413,11 @@ class MutantScreeningPipeline:
                     wt_folder_path = path
                     break
             
-            # Determine if we need to load from wt_path
-            # We load if:
-            # 1. WT was NOT found in folders
-            # 2. WT WAS found, but wt_path is a DIFFERENT directory (merge data)
             should_load_wt = False
             if not wt_in_folders:
                 should_load_wt = True
                 print(f"  WT not found in folders. Loading additional WT data from: {wt_path}")
             else:
-                # Check if paths are effectively the same
                 try:
                     if os.path.abspath(wt_path) != os.path.abspath(wt_folder_path):
                         should_load_wt = True
@@ -423,9 +425,6 @@ class MutantScreeningPipeline:
                     else:
                         print(f"  WT found in folders and matches --wt_path. Using loaded data.")
                 except Exception:
-                    # In case of path errors, default to loading to be safe, or skip. 
-                    # Let's assume if we can't verify, we might skip to avoid duplication if it looks similar, 
-                    # but here we'll skip if we can't verify to be safe against double counting.
                     pass
 
             if should_load_wt:
@@ -436,7 +435,7 @@ class MutantScreeningPipeline:
                     wt_files = [wt_path]
                 
                 wt_cells_accum = []
-                wt_cell_metadata = [] # Keep track of file origin for detailed results
+                wt_cell_metadata = [] 
                 for wf in wt_files:
                     w_data = self.extract_quality_cells(wf, enhance_contrast=True)
                     for i, (raw_c, pre_c) in enumerate(w_data):
@@ -447,13 +446,11 @@ class MutantScreeningPipeline:
                     print(f"    Loaded {len(wt_cells_accum)} cells from wt_path.")
                     wt_scores = self.compute_anomaly_scores(wt_cells_accum)
                     
-                    # Update analysis_data (for UMAP/Clustering)
                     analysis_data['features'].append(wt_scores['features_pca'])
                     analysis_data['sample_name'].extend(['WT'] * len(wt_cells_accum))
                     analysis_data['is_anomaly'].extend(wt_scores['predictions'] == -1)
                     analysis_data['mse'].extend(wt_scores['mse'])
                     
-                    # Update summary_results (for Phenotype Mosaic / CSV)
                     summary_results['WT'] = {
                         'sample_name': 'WT', 
                         'folder_path': wt_path, 
@@ -463,7 +460,6 @@ class MutantScreeningPipeline:
                         'is_wt': True
                     }
                     
-                    # Update detailed_results (for Violin Plots / XAI)
                     for i, (score, mse) in enumerate(zip(wt_scores['anomaly_scores'], wt_scores['mse'])):
                         f_path, local_idx = wt_cell_metadata[i]
                         detailed_results.append({
@@ -485,20 +481,14 @@ class MutantScreeningPipeline:
         # --- Run XAI Analysis (New Logic) ---
         print("  Running XAI analysis (WT Reference 5 cells & Top 5 Candidates)...")
         
-        # 1. WT Reference (5 cells closest to Median MSE)
         wt_name = next((s for s in summary_results.keys() if 'WT' == s.upper() or 'WT' in s.upper()), None)
-        # Prefer exact 'WT' match if available (from our manual add), otherwise finding first partial match
         if 'WT' in summary_results:
              wt_name = 'WT'
 
         if wt_name:
             wt_rows = df_detailed[df_detailed['sample_name'] == wt_name]
             if not wt_rows.empty:
-                # Calculate median MSE
                 median_mse = wt_rows['mse'].median()
-                # Find 5 cells with MSE closest to the median
-                # We calculate the absolute difference from median and sort by it
-                # Make a copy to avoid SettingWithCopyWarning
                 wt_rows = wt_rows.copy()
                 wt_rows['diff_from_median'] = (wt_rows['mse'] - median_mse).abs()
                 median_candidates = wt_rows.sort_values('diff_from_median').head(5)
@@ -518,11 +508,8 @@ class MutantScreeningPipeline:
         # 2. Top 5 Candidates per Series
         for sample in df_detailed['sample_name'].unique():
             s_rows = df_detailed[df_detailed['sample_name'] == sample]
-            # Top 5 by Anomaly Score
             top_5 = s_rows.nlargest(5, 'anomaly_score')
-            
             safe_sample_name = "".join(c for c in sample if c.isalnum() or c in ('-', '_')).rstrip()
-            
             for rank, (_, row) in enumerate(top_5.iterrows()):
                 try:
                     c_path = row['file_path']
@@ -547,7 +534,8 @@ class MutantScreeningPipeline:
             analysis_df = pd.DataFrame({'sample': analysis_data['sample_name'], 'is_anomaly': analysis_data['is_anomaly']})
             
             samples = sorted(analysis_df['sample'].unique())
-            palette = sns.color_palette("tab10", len(samples))
+            # Use Okabe-Ito (cycling if needed)
+            palette = sns.color_palette(self.okabe_ito, len(samples))
             color_map = dict(zip(samples, palette))
 
             if generate_umap:
@@ -557,7 +545,6 @@ class MutantScreeningPipeline:
                 self.create_tsne_visualization(all_features_pca, analysis_df, output_dir, color_map)
                 self.create_phate_visualization(all_features_pca, analysis_df, output_dir, color_map)
             
-            # Generate WT vs Mutant comparison plots if any visualization was created
             if generate_umap or run_extra_viz:
                 self.create_wt_vs_mutant_visualizations(analysis_df, output_dir, color_map)
 
@@ -572,21 +559,14 @@ class MutantScreeningPipeline:
         """
         Original (Raw), Reconstructed (from Preprocessed), and Difference Heatmap.
         """
-        # Prepare input (1, 64, 64, 1)
         img_batch = np.expand_dims(preprocessed_image, axis=0)
         img_batch = np.expand_dims(img_batch, axis=-1)
         
-        # Reconstruct
         reconstructed = self.autoencoder.predict(img_batch, verbose=0)
         reconstructed_img = reconstructed[0, :, :, 0]
         
-        # Calculate residuals (Absolute difference between Preprocessed and Reconstructed)
-        # Note: Usually residuals are calculated against the input to the AE (preprocessed).
-        # The prompt asks to display 'Original' (raw) but reconstruct 'preprocessed'.
-        # The difference should ideally be between what went in and what came out.
         diff = np.abs(preprocessed_image - reconstructed_img)
         
-        # Plot
         plt.figure(figsize=(12, 4))
         
         plt.subplot(1, 3, 1)
@@ -606,84 +586,71 @@ class MutantScreeningPipeline:
         plt.axis('off')
         
         plt.tight_layout()
-        plt.savefig(save_path)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
 
     def visualize_heatmap_overlay(self, raw_image, preprocessed_image, save_path):
         """
         Overlay reconstruction error heatmap on the raw image.
         """
-        # Prepare input
         img_batch = np.expand_dims(preprocessed_image, axis=0)
         img_batch = np.expand_dims(img_batch, axis=-1)
         
-        # Reconstruct
         reconstructed = self.autoencoder.predict(img_batch, verbose=0)
         reconstructed_img = reconstructed[0, :, :, 0]
         
-        # Calculate residuals
         diff = np.abs(preprocessed_image - reconstructed_img)
         
-        # Normalize diff for heatmap (0-1) for better visualization if needed, 
-        # but keeping absolute values is more physically meaningful. 
-        # However, for 'jet' colormap, it scales automatically if we use plt.imshow without vmin/vmax,
-        # or we can fix it. Let's let matplotlib scale it.
-        
         plt.figure(figsize=(6, 6))
-        # 1. Show Raw Image in Gray
         plt.imshow(raw_image, cmap='gray')
-        
-        # 2. Overlay Heatmap
-        # Use 'jet' colormap as requested, alpha=0.5
         plt.imshow(diff, cmap='jet', alpha=0.5)
         
         plt.axis('off')
         plt.tight_layout()
-        plt.savefig(save_path)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
 
     # --- Standard Visualization Methods ---
     def plot_anomaly_rates(self, df, output_dir, thresholds, mode_name):
         plt.figure(figsize=(14, 7))
         names = [n[:20] for n in df['sample_name']]
-        colors = ['blue' if is_wt else 'lightblue' for is_wt in df['is_wt']]
+        # Contrast: WT=DarkGray, Others=Orange
+        colors = ['#333333' if is_wt else '#E69F00' for is_wt in df['is_wt']]
         plt.bar(range(len(names)), df['anomaly_rate'] * 100, color=colors, alpha=0.8)
-        plt.axhline(thresholds['wt_rate'], color='blue', linestyle='--', label=f"WT Baseline ({thresholds['wt_rate']:.1f}%)")
-        plt.axhline(thresholds['threshold'], color='red', linestyle='--', label=f"Hit Threshold ({thresholds['threshold']:.1f}%)")
+        plt.axhline(thresholds['wt_rate'], color='#0072B2', linestyle='--', label=f"WT Baseline ({thresholds['wt_rate']:.1f}%)") # Blue
+        plt.axhline(thresholds['threshold'], color='#D55E00', linestyle='--', label=f"Hit Threshold ({thresholds['threshold']:.1f}%)") # Vermilion
         plt.xticks(range(len(names)), names, rotation=45, ha='right', fontsize=10)
         plt.ylabel('Anomaly Rate (%)'); plt.title(f'Anomaly Rates by Sample ({mode_name} Mode)'); plt.legend(); plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f'plot_anomaly_rates_{mode_name.lower()}.png'), dpi=300); plt.close()
+        plt.savefig(os.path.join(output_dir, f'plot_anomaly_rates_{mode_name.lower()}.png'), dpi=300, bbox_inches='tight'); plt.close()
 
     def plot_violin(self, df_detailed, output_dir, thresholds, mode_name):
         print("  Generating Violin Plot...")
         samples = df_detailed['sample_name'].unique()
         wt_name = next((s for s in samples if s.upper() == 'WT'), None)
 
-        # Plot 1: All samples together (original plot)
         plt.figure(figsize=(14, 8))
         order = [wt_name] + sorted([s for s in samples if s.upper() != 'WT']) if wt_name else sorted(samples)
-        sns.violinplot(x='sample_name', y='anomaly_score', data=df_detailed, order=order, palette='Set2', inner='quartile')
-        plt.axhline(thresholds['p99_score'], color='red', linestyle='--', linewidth=2, label=f'WT 99th Percentile ({thresholds["p99_score"]:.2f})')
+        sns.violinplot(x='sample_name', y='anomaly_score', data=df_detailed, order=order, palette=self.okabe_ito, inner='quartile')
+        plt.axhline(thresholds['p99_score'], color='#D55E00', linestyle='--', linewidth=2, label=f'WT 99th Percentile ({thresholds["p99_score"]:.2f})')
         plt.legend(loc='upper right'); plt.title(f'Anomaly Score Distribution ({mode_name} Mode)'); plt.ylabel('Anomaly Score (Higher = More Abnormal)'); plt.xlabel('Sample')
         plt.xticks(rotation=45, ha='right'); plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f'plot_violin_{mode_name.lower()}.png'), dpi=300); plt.close()
+        plt.savefig(os.path.join(output_dir, f'plot_violin_{mode_name.lower()}.png'), dpi=300, bbox_inches='tight'); plt.close()
 
-        # Plot 2: Individual WT vs Mutant plots
         if wt_name and mode_name.lower() == 'folder':
             mutants = [s for s in samples if s != wt_name]
             for mutant in mutants:
                 plt.figure(figsize=(8, 6))
                 sub_df = df_detailed[df_detailed['sample_name'].isin([wt_name, mutant])]
-                sns.violinplot(x='sample_name', y='anomaly_score', data=sub_df, order=[wt_name, mutant], palette=['lightblue', 'salmon'])
-                plt.axhline(thresholds['p99_score'], color='red', linestyle='--', linewidth=2, label=f'WT 99th Percentile ({thresholds["p99_score"]:.2f})')
+                # Contrast: WT=Black, Mutant=Vermilion
+                sns.violinplot(x='sample_name', y='anomaly_score', data=sub_df, order=[wt_name, mutant], palette=['#333333', '#D55E00'])
+                plt.axhline(thresholds['p99_score'], color='#0072B2', linestyle='--', linewidth=2, label=f'WT 99th Percentile ({thresholds["p99_score"]:.2f})')
                 plt.legend(loc='upper right')
                 plt.title(f'Anomaly Score: WT vs {mutant}')
                 plt.ylabel('Anomaly Score')
                 plt.xlabel('')
                 plt.tight_layout()
-                # To avoid issues with filenames, sanitize mutant names
                 sanitized_mutant_name = "".join(c for c in mutant if c.isalnum() or c in ('-', '_')).rstrip()
-                plt.savefig(os.path.join(output_dir, f'plot_violin_WT_vs_{sanitized_mutant_name}_{mode_name.lower()}.png'), dpi=300)
+                plt.savefig(os.path.join(output_dir, f'plot_violin_WT_vs_{sanitized_mutant_name}_{mode_name.lower()}.png'), dpi=300, bbox_inches='tight')
                 plt.close()
 
     def generate_phenotype_mosaic(self, df_summary, df_detailed, output_dir, thresholds, mode, top_n_samples=5, top_n_cells=5):
@@ -701,13 +668,11 @@ class MutantScreeningPipeline:
             label_suffix, candidates = ("(Typical)", s_data.nsmallest(top_n_cells, 'anomaly_score')) if 'WT' in sample_name.upper() else ("(Anomaly)", s_data.nlargest(top_n_cells, 'anomaly_score'))
             axes[r, 0].text(-0.2, 0.5, f"{sample_name}\n{label_suffix}", transform=axes[r, 0].transAxes, va='center', ha='right', fontsize=11, fontweight='bold')
             if mode == 'file':
-                # Unpack and take raw cell (index 0)
                 cells_data = self.extract_quality_cells(df_summary.loc[sample_name, 'file_path'], enhance_contrast=False)
                 raw_cells = [c[0] for c in cells_data]
             for c, (_, cand_row) in enumerate(candidates.iterrows()):
                 ax = axes[r, c]
                 if mode == 'folder':
-                    # Unpack and take raw cell (index 0)
                     cells_data = self.extract_quality_cells(cand_row['file_path'], enhance_contrast=False)
                     raw_cells = [c[0] for c in cells_data]
                 cell_idx = cand_row.get('local_idx', cand_row.get('cell_id'))
@@ -717,7 +682,7 @@ class MutantScreeningPipeline:
                     ax.set_title(f"{score:.1f}", color='red' if score > thresholds['p99_score'] else 'black', fontsize=10, fontweight='bold')
                 ax.axis('off')
         plt.suptitle("Phenotype Mosaic (Raw Images)"); plt.tight_layout(rect=[0, 0.03, 1, 0.97])
-        plt.savefig(os.path.join(output_dir, f'plot_phenotype_mosaic_{mode.lower()}.png'), dpi=300); plt.close()
+        plt.savefig(os.path.join(output_dir, f'plot_phenotype_mosaic_{mode.lower()}.png'), dpi=300, bbox_inches='tight'); plt.close()
 
     # --- Extended Visualization & Analysis Methods ---
     def _plot_embedding(self, df, x_col, y_col, title, filename, color_map):
@@ -726,13 +691,30 @@ class MutantScreeningPipeline:
         handles = [plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color_map[s], markersize=10) for s in color_map]
         plt.legend(handles, color_map.keys(), title='Strain', bbox_to_anchor=(1.05, 1), loc='upper left')
         plt.title(title); plt.tight_layout()
-        plt.savefig(filename, dpi=300); plt.close()
+        plt.savefig(filename, dpi=300, bbox_inches='tight'); plt.close()
 
     def create_umap_visualization(self, features, df, output_dir, color_map):
         print("  Generating UMAP plot...")
         embedding = umap.UMAP(n_components=2, random_state=42).fit_transform(features)
         df['UMAP1'], df['UMAP2'] = embedding[:, 0], embedding[:, 1]
         self._plot_embedding(df, 'UMAP1', 'UMAP2', 'UMAP 2D Projection', os.path.join(output_dir, 'plot_umap.png'), color_map)
+
+        # --- MSE Visualization on UMAP ---
+        if 'mse' in df.columns:
+            print("  Generating UMAP MSE plot...")
+            # Sort by MSE so high MSE points are plotted on top
+            df_sorted = df.sort_values('mse', ascending=True)
+            
+            plt.figure(figsize=(10, 8))
+            # cmap='cividis' for colorblind friendly sequential, sort ascending
+            sc = plt.scatter(df_sorted['UMAP1'], df_sorted['UMAP2'], c=df_sorted['mse'], cmap='cividis', s=10, alpha=0.8)
+            plt.colorbar(sc, label='Reconstruction MSE')
+            plt.title('UMAP Colored by Reconstruction Error (MSE)')
+            plt.xlabel('UMAP1')
+            plt.ylabel('UMAP2')
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, 'plot_umap_mse.png'), dpi=300, bbox_inches='tight')
+            plt.close()
 
     def create_pca_visualization(self, features, df, output_dir, color_map):
         print("  Generating PCA plot...")
@@ -765,46 +747,36 @@ class MutantScreeningPipeline:
 
         mutant_samples = [s for s in df['sample'].unique() if s != wt_sample_name]
         
-        # Colors for the comparison plots
-        # Background (Others): Gray
-        # WT: Blue (or similar distinct color)
-        # Mutant: Red (or similar distinct color)
-        
         for mutant in mutant_samples:
-            # Prepare plotting logic for this mutant
-            
             sanitized_mutant_name = "".join(c for c in mutant if c.isalnum() or c in ('-', '_')).rstrip()
             
-            # Helper function for scatter plot
             def plot_highlight(x_col, y_col, plot_name, filename):
                 plt.figure(figsize=(10, 8))
                 
-                # Masks
                 mask_wt = df['sample'] == wt_sample_name
                 mask_mutant = df['sample'] == mutant
                 mask_others = ~(mask_wt | mask_mutant)
                 
-                # Plot "Others" first (background)
+                # Others: Gray, small, transparent
                 plt.scatter(df.loc[mask_others, x_col], df.loc[mask_others, y_col], 
-                            c='lightgray', alpha=0.3, s=15, label='Others', edgecolors='none')
+                            c='lightgray', alpha=0.2, s=15, label='Others', edgecolors='none', marker='.')
                 
-                # Plot "WT"
+                # WT: Black/DarkGray, Circle, more distinct
                 plt.scatter(df.loc[mask_wt, x_col], df.loc[mask_wt, y_col], 
-                            c='blue', alpha=0.6, s=25, label=wt_sample_name, edgecolors='none')
+                            c='#000000', alpha=0.6, s=30, label=wt_sample_name, edgecolors='none', marker='o')
                 
-                # Plot "Mutant" (Target)
+                # Mutant: Vermilion (from Okabe-Ito), Triangle, distinct
                 plt.scatter(df.loc[mask_mutant, x_col], df.loc[mask_mutant, y_col], 
-                            c='red', alpha=0.8, s=30, label=mutant, edgecolors='white', linewidth=0.5)
+                            c='#D55E00', alpha=0.8, s=40, label=mutant, edgecolors='white', linewidth=0.5, marker='^')
                 
                 plt.title(f"{plot_name}: WT vs {mutant}")
                 plt.xlabel(x_col)
                 plt.ylabel(y_col)
                 plt.legend(loc='upper right')
                 plt.tight_layout()
-                plt.savefig(filename, dpi=300)
+                plt.savefig(filename, dpi=300, bbox_inches='tight')
                 plt.close()
 
-            # Generate UMAP comparison
             if 'UMAP1' in df.columns:
                 plot_highlight('UMAP1', 'UMAP2', 'UMAP', os.path.join(output_dir, f'umap_compare_WT_vs_{sanitized_mutant_name}.png'))
 
@@ -831,29 +803,47 @@ class MutantScreeningPipeline:
         clusterer = hdbscan.HDBSCAN(min_cluster_size=15, min_samples=5)
         df['cluster'] = clusterer.fit_predict(features)
         
-        # Composition analysis
         composition = df.groupby(['sample', 'cluster']).size().unstack(fill_value=0)
         composition_perc = composition.div(composition.sum(axis=1), axis=0) * 100
         composition_perc.to_csv(os.path.join(output_dir, 'quantitative_clustering_composition.csv'))
         
-        # Plot composition heatmap
         plt.figure(figsize=(12, 8))
         sns.heatmap(composition_perc, annot=True, fmt='.1f', cmap='viridis')
         plt.title('Cluster Composition (%) by Sample')
         plt.xlabel('Cluster ID (-1 = Outliers)')
         plt.ylabel('Sample')
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'quantitative_clustering_heatmap.png'), dpi=300)
+        plt.savefig(os.path.join(output_dir, 'quantitative_clustering_heatmap.png'), dpi=300, bbox_inches='tight')
         plt.close()
 
-        # Plot UMAP colored by cluster if UMAP data exists
+        # Plot difference from WT heatmap
+        wt_name = next((s for s in composition_perc.index if s.upper() == 'WT'), None)
+        if wt_name:
+            wt_comp = composition_perc.loc[wt_name]
+            diff_df = composition_perc.subtract(wt_comp, axis=1)
+            
+            plt.figure(figsize=(12, 8))
+            # cmap='PuOr' for colorblind friendly divergent (Purple-Orange)
+            sns.heatmap(diff_df, annot=True, fmt='.1f', cmap='PuOr', center=0)
+            plt.title('Cluster Composition Difference (Sample - WT)')
+            plt.xlabel('Cluster ID (-1 = Outliers)')
+            plt.ylabel('Sample')
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, 'quantitative_clustering_diff_heatmap.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+
         if 'UMAP1' in df.columns:
             plt.figure(figsize=(10, 8))
             unique_clusters = sorted(df['cluster'].unique())
-            # Handle case with only outliers (-1)
             num_clusters = len(unique_clusters)
-            palette = sns.color_palette("viridis", num_clusters - 1 if -1 in unique_clusters else num_clusters)
-            
+            # Use a categorical palette, Okabe-Ito might be too small if many clusters, but generally safe.
+            # Fallback to viridis or tab20 if clusters > 8, but user requested global style.
+            # Let's stick to sns default or customized if small.
+            if num_clusters <= 8:
+                 palette = sns.color_palette(self.okabe_ito, num_clusters)
+            else:
+                 palette = sns.color_palette("tab20", num_clusters)
+
             cluster_colors = [c for c in unique_clusters if c != -1]
             color_map_cluster = {cluster: palette[i] for i, cluster in enumerate(cluster_colors)}
             if -1 in unique_clusters:
@@ -863,21 +853,20 @@ class MutantScreeningPipeline:
             plt.title('UMAP Projection with HDBSCAN Clusters')
             plt.legend(title='Cluster ID', bbox_to_anchor=(1.05, 1), loc='upper left')
             plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, 'plot_umap_hdbscan_clusters.png'), dpi=300)
+            plt.savefig(os.path.join(output_dir, 'plot_umap_hdbscan_clusters.png'), dpi=300, bbox_inches='tight')
             plt.close()
 
-        # WT cluster distribution bar plot
         wt_name = next((s for s in composition_perc.index if s.upper() == 'WT'), None)
         if wt_name:
             wt_composition = composition_perc.loc[wt_name]
             plt.figure(figsize=(8, 6))
-            wt_composition.plot(kind='bar', color='skyblue')
+            wt_composition.plot(kind='bar', color='#56B4E9') # Sky Blue
             plt.title('Cluster Distribution for WT')
             plt.ylabel('Percentage (%)')
             plt.xlabel('Cluster ID')
             plt.xticks(rotation=0)
             plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, 'quantitative_wt_cluster_distribution.png'), dpi=300)
+            plt.savefig(os.path.join(output_dir, 'quantitative_wt_cluster_distribution.png'), dpi=300, bbox_inches='tight')
             plt.close()
             
         print(f"  Saved clustering results to {output_dir}")
