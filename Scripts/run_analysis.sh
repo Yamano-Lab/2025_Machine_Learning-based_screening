@@ -3,7 +3,7 @@
 # --- 設定項目 ---
 
 # モデルが保存されているディレクトリのパス
-MODEL_DIR="results/Models/20251224_1722"
+MODEL_DIR="/Users/matsuokoujirou/Documents/Data/Screening/Models/20250613_1524_improved"
 
 # 解析対象のサンプル群が入っているルートフォルダのパス
 INPUT_DIR="/Users/matsuokoujirou/Documents/Data/Screening/Abnormal_data/alldata"
@@ -12,8 +12,7 @@ INPUT_DIR="/Users/matsuokoujirou/Documents/Data/Screening/Abnormal_data/alldata"
 WT_PATH="data/raw_images"
 
 # 出力先ディレクトリ（指定しない場合は自動生成されます）
-OUTPUT_DIR="results/analysis_results/1224_02"
-
+OUTPUT_DIR="results/analysis_results/1229_05"
 # --- 解析の実行 ---
 
 # 自動モード判定: INPUT_DIR 内にサブディレクトリがあるか確認
