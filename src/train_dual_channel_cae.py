@@ -13,7 +13,6 @@ from skimage import exposure
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, UpSampling2D, BatchNormalization, LeakyReLU
 from tensorflow.keras.models import Model
-from tensorflow.keras.applications import VGG19
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from tensorflow.keras.optimizers import Adam
 from sklearn.svm import OneClassSVM
@@ -76,28 +75,35 @@ class DualChannelAnomalyDetectionTraining:
                 # Crop both channels
                 cell_red = red_channel[minr:maxr, minc:maxc]
                 cell_green = green_channel[minr:maxr, minc:maxc]
+                cell_mask = labels[minr:maxr, minc:maxc] > 0
                 
                 # Quality check based on Green Channel
                 cell_mean = np.mean(cell_green)
                 cell_std = np.std(cell_green)
                 if cell_mean < 0.5 or cell_std < 0.1: continue
                 
-                # Resize and Normalize (0-1) independently
-                # Note: Not using CLAHE here to preserve relative intensity differences if important,
-                # or applying same CLAHE. 
-                # The prompt asks for normalization. Let's stick to simple 0-1 scaling for now 
-                # or CLAHE if consistent with previous. Previous used equalize_adapthist on Green.
-                # Let's use equalize_adapthist for consistency and feature enhancement.
+                # Normalize (Min-Max) independently and apply Mask
+                # This ensures dark Green channels (pyrenoids) are visible to the network
                 
                 # Red
-                cell_red_float = cell_red / max_red
-                cell_red_eq = exposure.equalize_adapthist(cell_red_float, clip_limit=0.02)
-                cell_red_resized = resize(cell_red_eq, (64, 64), anti_aliasing=True)
+                r_min, r_max = cell_red.min(), cell_red.max()
+                if r_max > r_min:
+                    cell_red_norm = (cell_red - r_min) / (r_max - r_min)
+                else:
+                    cell_red_norm = np.zeros_like(cell_red, dtype=np.float32)
+                # Apply mask to remove background noise
+                cell_red_norm = cell_red_norm * cell_mask
+                cell_red_resized = resize(cell_red_norm, (64, 64), anti_aliasing=True)
                 
                 # Green
-                cell_green_float = cell_green / max_green
-                cell_green_eq = exposure.equalize_adapthist(cell_green_float, clip_limit=0.02)
-                cell_green_resized = resize(cell_green_eq, (64, 64), anti_aliasing=True)
+                g_min, g_max = cell_green.min(), cell_green.max()
+                if g_max > g_min:
+                    cell_green_norm = (cell_green - g_min) / (g_max - g_min)
+                else:
+                    cell_green_norm = np.zeros_like(cell_green, dtype=np.float32)
+                # Apply mask to remove background noise
+                cell_green_norm = cell_green_norm * cell_mask
+                cell_green_resized = resize(cell_green_norm, (64, 64), anti_aliasing=True)
                 
                 # Stack to (64, 64, 2)
                 cell_combined = np.stack([cell_red_resized, cell_green_resized], axis=-1)
@@ -135,49 +141,50 @@ class DualChannelAnomalyDetectionTraining:
     def create_high_capacity_autoencoder(self, input_shape=(64, 64, 2)):
         """Dual-Channel Input/Output Autoencoder"""
         
-        # --- Encoder (No Pooling: Strided Convolutions) ---
+        # --- Encoder (High Resolution Preservation) ---
         input_img = Input(shape=input_shape, name='encoder_input')
         
-        # Layer 1
+        # Layer 1: 64x64 -> 32x32
         x = Conv2D(64, (3, 3), padding='same')(input_img)
         x = BatchNormalization()(x)
         x = LeakyReLU(alpha=0.1)(x)
-        # Replace MaxPooling with Strided Conv
         x = Conv2D(64, (3, 3), strides=(2, 2), padding='same')(x)
         x = BatchNormalization()(x)
         x = LeakyReLU(alpha=0.1)(x)
         
-        # Layer 2
+        # Layer 2: 32x32 -> 16x16
         x = Conv2D(128, (3, 3), padding='same')(x)
         x = BatchNormalization()(x)
         x = LeakyReLU(alpha=0.1)(x)
-        # Replace MaxPooling with Strided Conv
         x = Conv2D(128, (3, 3), strides=(2, 2), padding='same')(x)
         x = BatchNormalization()(x)
         x = LeakyReLU(alpha=0.1)(x)
         
-        # Layer 3
-        x = Conv2D(64, (3, 3), padding='same')(x)
+        # Layer 3: 16x16 -> 16x16 (No Downsampling to keep detail)
+        x = Conv2D(256, (3, 3), padding='same')(x)
         x = BatchNormalization()(x)
         x = LeakyReLU(alpha=0.1)(x)
-        # Replace MaxPooling with Strided Conv
-        x = Conv2D(64, (3, 3), strides=(2, 2), padding='same')(x)
+        # Stride 1x1 here
+        x = Conv2D(256, (3, 3), strides=(1, 1), padding='same')(x)
         x = BatchNormalization()(x)
-        encoded = LeakyReLU(alpha=0.1, name='encoded_output')(x) # 8x8x64
+        encoded = LeakyReLU(alpha=0.1, name='encoded_output')(x) # 16x16x256
         
         # --- Decoder ---
-        encoded_input = Input(shape=(8, 8, 64), name='decoder_input')
+        encoded_input = Input(shape=(16, 16, 256), name='decoder_input')
         
-        x = Conv2D(64, (3, 3), padding='same')(encoded_input)
+        # Layer 3 Reverse: 16x16 -> 16x16
+        x = Conv2D(256, (3, 3), padding='same')(encoded_input)
         x = BatchNormalization()(x)
         x = LeakyReLU(alpha=0.1)(x)
-        x = UpSampling2D((2, 2))(x)
+        # No UpSampling here
         
+        # Layer 2 Reverse: 16x16 -> 32x32
         x = Conv2D(128, (3, 3), padding='same')(x)
         x = BatchNormalization()(x)
         x = LeakyReLU(alpha=0.1)(x)
         x = UpSampling2D((2, 2))(x)
         
+        # Layer 1 Reverse: 32x32 -> 64x64
         x = Conv2D(64, (3, 3), padding='same')(x)
         x = BatchNormalization()(x)
         x = LeakyReLU(alpha=0.1)(x)
@@ -192,44 +199,70 @@ class DualChannelAnomalyDetectionTraining:
         autoencoder_output = decoder(encoder(input_img))
         autoencoder = Model(input_img, autoencoder_output, name='autoencoder')
         
-        # --- Perceptual Loss (VGG19) ---
-        # VGG19モデルの準備 (重み固定)
-        vgg = VGG19(weights='imagenet', include_top=False, input_shape=(64, 64, 3))
-        vgg.trainable = False
-        # 特徴抽出用モデル (block3_conv3を使用)
-        loss_model = Model(inputs=vgg.input, outputs=vgg.get_layer('block3_conv3').output)
-        loss_model.trainable = False
-        
-        def perceptual_loss(y_true, y_pred):
-            # 1. MAE Loss
-            mae = tf.reduce_mean(tf.abs(y_true - y_pred))
+        # Hybrid Loss (MSE + SSIM) for Structure Preservation
+        def hybrid_loss(y_true, y_pred):
+            # y_true/pred shape: (Batch, H, W, 2)
+            # 0: Red (Chl), 1: Green (Pyr)
             
-            # 2. Perceptual Loss
-            # Input is (Batch, 64, 64, 2). VGG needs 3 channels.
-            # Pad with zeros for Blue channel.
-            zeros = tf.zeros_like(y_true[..., 0:1])
-            y_true_3ch = tf.concat([y_true, zeros], axis=-1)
-            y_pred_3ch = tf.concat([y_pred, zeros], axis=-1)
+            # 1. Weighted MSE (Color/Brightness)
+            diff_sq = tf.square(y_true - y_pred)
+            mse_red = tf.reduce_mean(diff_sq[..., 0])
+            mse_green = tf.reduce_mean(diff_sq[..., 1])
+            mse_term = mse_red + 20.0 * mse_green
             
-            # 特徴量抽出
-            feat_true = loss_model(y_true_3ch)
-            feat_pred = loss_model(y_pred_3ch)
+            # 2. SSIM (Structure/Sharpness)
+            # Calculate SSIM for each image in batch and average
+            ssim_val = tf.image.ssim(y_true, y_pred, max_val=1.0)
+            ssim_loss = 1.0 - tf.reduce_mean(ssim_val)
             
-            # 特徴量間のMAE
-            feat_loss = tf.reduce_mean(tf.abs(feat_true - feat_pred))
-            
-            # 組み合わせ (MAE + 0.1 * VGG_Loss)
-            return mae + 0.1 * feat_loss
+            # Combine: MSE + 2.0 * SSIM
+            return mse_term + 2.0 * ssim_loss
 
         # コンパイル
         autoencoder.compile(
             optimizer=Adam(learning_rate=0.0001), 
-            loss=perceptual_loss,
+            loss=hybrid_loss,
             metrics=['mse', 'mae']
         )
         
         return autoencoder, encoder, decoder
     
+    def visualize_2ch(self, image_data):
+        """
+        Visualize (64, 64, 2) as an RGB image.
+        R=Red Ch, G=Green Ch, B=0
+        """
+        h, w, c = image_data.shape
+        rgb = np.zeros((h, w, 3), dtype=np.float32)
+        if c >= 1: rgb[..., 0] = image_data[..., 0] # Red
+        if c >= 2: rgb[..., 1] = image_data[..., 1] # Green
+        return np.clip(rgb, 0, 1)
+
+    def save_reconstruction_examples(self, autoencoder, X_val, filename='reconstruction_samples.png'):
+        print(f"Generating reconstruction examples to {filename}...")
+        n = 10
+        # Select random samples
+        indices = np.random.choice(len(X_val), n, replace=False) if len(X_val) > n else np.arange(len(X_val))
+        samples = X_val[indices]
+        reconstructed = autoencoder.predict(samples, verbose=0)
+        
+        plt.figure(figsize=(20, 4))
+        for i in range(len(samples)):
+            # Original
+            ax = plt.subplot(2, n, i + 1)
+            plt.imshow(self.visualize_2ch(samples[i]))
+            plt.title("Normalized + Masked")
+            plt.axis("off")
+            
+            # Reconstructed
+            ax = plt.subplot(2, n, i + 1 + n)
+            plt.imshow(self.visualize_2ch(reconstructed[i]))
+            plt.title("Reconstructed")
+            plt.axis("off")
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, filename), dpi=150)
+        plt.close()
+
     def train_autoencoder(self, cell_images):
         print("=== Training Dual-Channel Autoencoder (Rotation Invariant) ===")
         
@@ -283,6 +316,9 @@ class DualChannelAnomalyDetectionTraining:
         
         self.plot_training_history(history)
         
+        # Save reconstruction examples
+        self.save_reconstruction_examples(autoencoder, X_val)
+        
         # 保存
         autoencoder.save(os.path.join(self.output_dir, 'final_autoencoder.keras'))
         encoder.save(os.path.join(self.output_dir, 'encoder.keras'))
@@ -294,14 +330,32 @@ class DualChannelAnomalyDetectionTraining:
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
         ax1.plot(history.history['loss'], label='Training Loss')
         ax1.plot(history.history['val_loss'], label='Validation Loss')
-        ax1.set_title('Model Loss (Perceptual)')
+        ax1.set_title('Model Loss (Hybrid: MSE + SSIM)')
         ax1.legend()
         plt.tight_layout()
         plt.savefig(os.path.join(self.output_dir, 'training_history.png'), dpi=300)
         plt.close()
 
-    def create_anomaly_detector(self, encoder, cell_images):
+    def plot_anomaly_score_distribution(self, scores, filename='anomaly_score_dist.png'):
+        plt.figure(figsize=(10, 6))
+        plt.hist(scores, bins=50, color='blue', alpha=0.7, log=True)
+        plt.title('Anomaly Score (MSE) Distribution (Log Scale)')
+        plt.xlabel('Mean Squared Error')
+        plt.ylabel('Count (Log)')
+        plt.grid(True, which="both", ls="-", alpha=0.2)
+        plt.savefig(os.path.join(self.output_dir, filename), dpi=300)
+        plt.close()
+
+    def create_anomaly_detector(self, autoencoder, encoder, cell_images):
         print("=== Creating Anomaly Detector (with Rotation Augmentation) ===")
+        
+        # Calculate MSE for anomaly score distribution
+        print("Calculating MSE distribution for training data...")
+        X = cell_images.astype('float32')
+        reconstructions = autoencoder.predict(X, verbose=0)
+        mse_scores = np.mean(np.square(X - reconstructions), axis=(1, 2, 3))
+        self.plot_anomaly_score_distribution(mse_scores)
+        
         # Augment training data for SVM as well to ensure the SVM boundary 
         # covers rotated versions of normal cells.
         X = cell_images.astype('float32')
@@ -346,7 +400,7 @@ def main():
     if len(cell_images) < 100: return
     
     autoencoder, encoder, history = trainer.train_autoencoder(cell_images)
-    trainer.create_anomaly_detector(encoder, cell_images)
+    trainer.create_anomaly_detector(autoencoder, encoder, cell_images)
     print(f"\n=== TRAINING COMPLETED ===")
 
 if __name__ == "__main__":
