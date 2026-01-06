@@ -45,6 +45,15 @@ def align_and_crop_single_image(file_path, output_dir, model_name='2D_versatile_
         for i, prop in enumerate(props):
             if prop.area < 200 or prop.area > 8000: continue
             if prop.eccentricity > 0.95: continue
+            
+            # --- Shape Filtering (New) ---
+            # 1. Solidity check (Reject concave/irregular shapes)
+            if prop.solidity < 0.9: continue
+            
+            # 2. Circularity check (Reject complex/elongated shapes)
+            # Formula: (4 * pi * Area) / (Perimeter^2)
+            circularity = (4 * math.pi * prop.area) / (prop.perimeter ** 2) if prop.perimeter > 0 else 0
+            if circularity < 0.8: continue
 
             minr, minc, maxr, maxc = prop.bbox
             h, w = maxr - minr, maxc - minc
