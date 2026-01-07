@@ -24,7 +24,7 @@ echo "Input:  ${INPUT_DIR}"
 echo "Output: ${OUTPUT_DIR}"
 
 # Pythonスクリプトの実行
-python ./src/CAE_improved_modeltrain.py \
+python ./src/train_dual_channel_cae.py \
     --input_dir "${INPUT_DIR}" \
     --output_dir "${OUTPUT_DIR}"
 
