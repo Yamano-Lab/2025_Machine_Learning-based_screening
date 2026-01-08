@@ -8,6 +8,8 @@ __pycache__/
 # Data & Results (絶対にアップロードしない)
 *.tif
 *.tiff
+*.png
+*.csv
 /data/
 /results/
 /Models/
