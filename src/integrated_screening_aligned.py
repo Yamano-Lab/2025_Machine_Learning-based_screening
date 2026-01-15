@@ -47,8 +47,9 @@ class MutantScreeningPipeline:
     をサポートします。
     """
 
-    def __init__(self, model_dir):
+    def __init__(self, model_dir, use_prealigned=False):
         self.model_dir = model_dir
+        self.use_prealigned = use_prealigned
         
         # --- Visual Style Setup (Okabe-Ito & Publication Ready) ---
         # Okabe-Ito Palette (Colorblind friendly)
@@ -90,22 +91,42 @@ class MutantScreeningPipeline:
                 self.decoder = Model(decoder_input, x)
                 print("  Decoder extracted and reconstructed successfully.")
             else:
-                # If no pooling layer is found (likely for strided conv models), try to find where encoder ends
-                # This logic depends on specific model architecture.
-                # For safety in this aligned version, we skip if not standard.
                 pass
 
             self.encoder = load_model(os.path.join(self.model_dir, 'encoder.keras'), compile=False)
-            with open(os.path.join(self.model_dir, 'scaler.pkl'), 'rb') as f:
-                self.scaler = pickle.load(f)
-            with open(os.path.join(self.model_dir, 'pca.pkl'), 'rb') as f:
-                self.pca = pickle.load(f)
-            # Load detector if available (might not be needed if only using AE reconstruction error)
-            det_path = os.path.join(self.model_dir, 'detector_conservative.pkl')
-            if os.path.exists(det_path):
-                with open(det_path, 'rb') as f:
-                    self.detector_conservative = pickle.load(f)
+            
+            # --- Load Scaler (Priority: v2 -> v1) ---
+            scaler_path_v2 = os.path.join(self.model_dir, 'scaler_v2.pkl')
+            scaler_path_v1 = os.path.join(self.model_dir, 'scaler.pkl')
+            if os.path.exists(scaler_path_v2):
+                print(f"  Loading Scaler V2 from {scaler_path_v2}")
+                with open(scaler_path_v2, 'rb') as f: self.scaler = pickle.load(f)
             else:
+                print(f"  Loading Scaler V1 from {scaler_path_v1}")
+                with open(scaler_path_v1, 'rb') as f: self.scaler = pickle.load(f)
+
+            # --- Load PCA (Priority: v2 -> v1) ---
+            pca_path_v2 = os.path.join(self.model_dir, 'pca_v2.pkl')
+            pca_path_v1 = os.path.join(self.model_dir, 'pca.pkl')
+            if os.path.exists(pca_path_v2):
+                print(f"  Loading PCA V2 from {pca_path_v2}")
+                with open(pca_path_v2, 'rb') as f: self.pca = pickle.load(f)
+            else:
+                print(f"  Loading PCA V1 from {pca_path_v1}")
+                with open(pca_path_v1, 'rb') as f: self.pca = pickle.load(f)
+
+            # --- Load Detector (Priority: svm_v2 -> conservative) ---
+            det_path_v2 = os.path.join(self.model_dir, 'detector_svm_v2.pkl')
+            det_path_v1 = os.path.join(self.model_dir, 'detector_conservative.pkl')
+            
+            if os.path.exists(det_path_v2):
+                print(f"  Loading Detector V2 (SVM) from {det_path_v2}")
+                with open(det_path_v2, 'rb') as f: self.detector_conservative = pickle.load(f)
+            elif os.path.exists(det_path_v1):
+                print(f"  Loading Detector V1 from {det_path_v1}")
+                with open(det_path_v1, 'rb') as f: self.detector_conservative = pickle.load(f)
+            else:
+                print("  [Warning] No anomaly detector found (using MSE only).")
                 self.detector_conservative = None
                 
             self.stardist_model = StarDist2D.from_pretrained('2D_versatile_fluo')
@@ -123,6 +144,17 @@ class MutantScreeningPipeline:
              but here 'processed' IS 'aligned'.)
         """
         try:
+            if self.use_prealigned:
+                try:
+                    image = tiff.imread(image_path)
+                    if image.shape == (64, 64, 2):
+                        return [(image, image)]
+                    else:
+                        return []
+                except Exception as e:
+                    print(f"Error reading pre-aligned image {image_path}: {e}")
+                    return []
+
             image = tiff.imread(image_path)
             if image.ndim == 3 and image.shape[-1] >= 2:
                 red_channel = image[..., 0]
@@ -140,17 +172,22 @@ class MutantScreeningPipeline:
             p99_red = np.percentile(red_channel, 99.9)
             p99_green = np.percentile(green_channel, 99.9)
             
+            H, W = red_channel.shape
+            
             for prop in props:
-                # 1. Basic Filters
+                # 1. Edge Exclusion (Skip cells touching borders)
+                minr, minc, maxr, maxc = prop.bbox
+                if minr <= 1 or minc <= 1 or maxr >= H - 1 or maxc >= W - 1:
+                    continue
+
+                # 2. Strict Shape Filtering (Quality Control)
                 if prop.area < 200 or prop.area > 8000: continue
                 if prop.eccentricity > 0.95: continue
-                
-                # 2. Enhanced Shape Filters
                 if prop.solidity < 0.9: continue
+                
                 circularity = (4 * math.pi * prop.area) / (prop.perimeter ** 2) if prop.perimeter > 0 else 0
                 if circularity < 0.8: continue
 
-                minr, minc, maxr, maxc = prop.bbox
                 h, w = maxr - minr, maxc - minc
                 margin = int(max(h, w) * 0.5)
                 
@@ -289,8 +326,31 @@ class MutantScreeningPipeline:
 
     def _get_folders_from_path(self, root_path):
         if not os.path.isdir(root_path): return {}
-        subfolders = [f.path for f in os.scandir(root_path) if f.is_dir()]
-        return {os.path.basename(f): f for f in subfolders}
+        target_folders = {}
+        for root, dirs, files in os.walk(root_path):
+            # Check if this folder contains any tif files
+            has_tif = any(f.endswith('.tif') or f.endswith('.tiff') for f in files)
+            if has_tif:
+                # Use the relative path from root_path as the sample name, replacing separators with underscores
+                rel_path = os.path.relpath(root, root_path)
+                if rel_path == '.':
+                    sample_name = os.path.basename(root_path)
+                else:
+                    # e.g. Mutant/mutantA -> Mutant_mutantA
+                    # or just use the folder name if unique? Let's use full relative path to be safe.
+                    # sample_name = rel_path.replace(os.sep, '_')
+                    # Actually, user might prefer just the folder name if unique. 
+                    # Let's stick to folder name for simplicity, but handle duplicates?
+                    # "Mutant/mutantA" -> "mutantA"
+                    sample_name = os.path.basename(root)
+                
+                # Check for duplicates
+                if sample_name in target_folders:
+                    # Fallback to unique name
+                    sample_name = f"{sample_name}_{os.path.basename(os.path.dirname(root))}"
+                
+                target_folders[sample_name] = root
+        return target_folders
 
     def _calculate_wt_baseline(self, wt_path):
         print(f"Calculating baseline from WT: {wt_path}")
@@ -669,28 +729,52 @@ class MutantScreeningPipeline:
         print(f"Folder mode processing complete. Results are in {output_dir}")
 
     # --- XAI Methods ---
+    def visualize_2ch(self, image_data):
+        """ (64, 64, 2) -> (64, 64, 3) RGB Conversion """
+        if image_data.ndim == 2: return image_data # Already grayscale
+        h, w, c = image_data.shape
+        rgb = np.zeros((h, w, 3), dtype=np.float32)
+        if c >= 1: rgb[..., 0] = image_data[..., 0] # Red (Chl)
+        if c >= 2: rgb[..., 1] = image_data[..., 1] # Green (Pyr)
+        return np.clip(rgb, 0, 1)
+
     def visualize_residuals(self, raw_image, preprocessed_image, save_path):
         """
         Original (Raw), Reconstructed (from Preprocessed), and Difference Heatmap.
         """
         img_batch = np.expand_dims(preprocessed_image, axis=0)
-        img_batch = np.expand_dims(img_batch, axis=-1)
         
-        reconstructed = self.autoencoder.predict(img_batch, verbose=0)
-        reconstructed_img = reconstructed[0, :, :, 0]
+        # Predict returns (1, 64, 64, C) or (1, 64, 64)
+        reconstructed = self.autoencoder.predict(img_batch, verbose=0)[0]
         
-        diff = np.abs(preprocessed_image - reconstructed_img)
+        # 1. Dimension Check: Ensure (64, 64, C)
+        if reconstructed.ndim == 2:
+            reconstructed = np.expand_dims(reconstructed, axis=-1)
+            
+        # 2. Channel Mismatch Check (Input 2ch vs Output 1ch)
+        if preprocessed_image.shape[-1] == 2 and reconstructed.shape[-1] == 1:
+            reconstructed = np.concatenate([reconstructed, reconstructed], axis=-1)
+        elif preprocessed_image.shape[-1] != reconstructed.shape[-1]:
+            # Fallback: slice to minimum common channels
+            min_c = min(preprocessed_image.shape[-1], reconstructed.shape[-1])
+            preprocessed_image_viz = preprocessed_image[..., :min_c]
+            reconstructed_viz = reconstructed[..., :min_c]
+        else:
+            preprocessed_image_viz = preprocessed_image
+            reconstructed_viz = reconstructed
+
+        diff = np.mean(np.abs(preprocessed_image_viz - reconstructed_viz), axis=-1)
         
         plt.figure(figsize=(12, 4))
         
         plt.subplot(1, 3, 1)
         plt.title("Original (Raw)")
-        plt.imshow(raw_image, cmap='gray')
+        plt.imshow(self.visualize_2ch(raw_image))
         plt.axis('off')
         
         plt.subplot(1, 3, 2)
         plt.title("Reconstructed")
-        plt.imshow(reconstructed_img, cmap='gray')
+        plt.imshow(self.visualize_2ch(reconstructed))
         plt.axis('off')
         
         plt.subplot(1, 3, 3)
@@ -708,15 +792,26 @@ class MutantScreeningPipeline:
         Overlay reconstruction error heatmap on the raw image.
         """
         img_batch = np.expand_dims(preprocessed_image, axis=0)
-        img_batch = np.expand_dims(img_batch, axis=-1)
         
-        reconstructed = self.autoencoder.predict(img_batch, verbose=0)
-        reconstructed_img = reconstructed[0, :, :, 0]
+        reconstructed = self.autoencoder.predict(img_batch, verbose=0)[0]
         
-        diff = np.abs(preprocessed_image - reconstructed_img)
+        if reconstructed.ndim == 2:
+            reconstructed = np.expand_dims(reconstructed, axis=-1)
+            
+        if preprocessed_image.shape[-1] == 2 and reconstructed.shape[-1] == 1:
+            reconstructed = np.concatenate([reconstructed, reconstructed], axis=-1)
+        elif preprocessed_image.shape[-1] != reconstructed.shape[-1]:
+            min_c = min(preprocessed_image.shape[-1], reconstructed.shape[-1])
+            preprocessed_image_viz = preprocessed_image[..., :min_c]
+            reconstructed_viz = reconstructed[..., :min_c]
+        else:
+            preprocessed_image_viz = preprocessed_image
+            reconstructed_viz = reconstructed
+            
+        diff = np.mean(np.abs(preprocessed_image_viz - reconstructed_viz), axis=-1)
         
         plt.figure(figsize=(6, 6))
-        plt.imshow(raw_image, cmap='gray')
+        plt.imshow(self.visualize_2ch(raw_image))
         plt.imshow(diff, cmap='jet', alpha=0.5)
         
         plt.axis('off')
@@ -744,7 +839,11 @@ class MutantScreeningPipeline:
 
         plt.figure(figsize=(14, 8))
         order = [wt_name] + sorted([s for s in samples if s.upper() != 'WT']) if wt_name else sorted(samples)
-        sns.violinplot(x='sample_name', y='anomaly_score', data=df_detailed, order=order, palette=self.okabe_ito, inner='quartile')
+        
+        # Updated for modern Seaborn: x, y, hue (same as x), legend=False
+        sns.violinplot(x='sample_name', y='anomaly_score', hue='sample_name', legend=False, 
+                       data=df_detailed, order=order, palette=self.okabe_ito, inner='quartile')
+        
         plt.axhline(thresholds['p99_score'], color='#D55E00', linestyle='--', linewidth=2, label=f'WT 99th Percentile ({thresholds["p99_score"]:.2f})')
         plt.legend(loc='upper right'); plt.title(f'Anomaly Score Distribution ({mode_name} Mode)'); plt.ylabel('Anomaly Score (Higher = More Abnormal)'); plt.xlabel('Sample')
         plt.xticks(rotation=45, ha='right'); plt.tight_layout()
@@ -756,7 +855,9 @@ class MutantScreeningPipeline:
                 plt.figure(figsize=(8, 6))
                 sub_df = df_detailed[df_detailed['sample_name'].isin([wt_name, mutant])]
                 # Contrast: WT=Black, Mutant=Vermilion
-                sns.violinplot(x='sample_name', y='anomaly_score', data=sub_df, order=[wt_name, mutant], palette=['#333333', '#D55E00'])
+                sns.violinplot(x='sample_name', y='anomaly_score', hue='sample_name', legend=False,
+                               data=sub_df, order=[wt_name, mutant], palette=['#333333', '#D55E00'])
+                
                 plt.axhline(thresholds['p99_score'], color='#0072B2', linestyle='--', linewidth=2, label=f'WT 99th Percentile ({thresholds["p99_score"]:.2f})')
                 plt.legend(loc='upper right')
                 plt.title(f'Anomaly Score: WT vs {mutant}')
@@ -792,7 +893,7 @@ class MutantScreeningPipeline:
                 cell_idx = cand_row.get('local_idx', cand_row.get('cell_id'))
                 if cell_idx < len(raw_cells):
                     img, score = raw_cells[cell_idx], cand_row['anomaly_score']
-                    ax.imshow(img, cmap='gray', vmin=0, vmax=1)
+                    ax.imshow(self.visualize_2ch(img), vmin=0, vmax=1)
                     ax.set_title(f"{score:.1f}", color='red' if score > thresholds['p99_score'] else 'black', fontsize=10, fontweight='bold')
                 ax.axis('off')
         plt.suptitle("Phenotype Mosaic (Raw Images)"); plt.tight_layout(rect=[0, 0.03, 1, 0.97])
@@ -1102,7 +1203,7 @@ class MutantScreeningPipeline:
             if n_cols == 1: axes = [axes]
             
             for i, ax in enumerate(axes):
-                ax.imshow(final_images[i][..., 1], cmap='gray') # Show Green channel for pyrenoid? Or both?
+                ax.imshow(self.visualize_2ch(final_images[i])) 
                 # Usually gallery shows structure. Let's show Green (pyrenoid) since alignment is based on it.
                 # Or better, show RGB if possible, or just Green.
                 # Let's show Green channel as grayscale for clarity of pyrenoid shape.
@@ -1127,6 +1228,7 @@ def main():
     parser.add_argument('--umap', action='store_true', help="Force UMAP generation (useful for 'file' or 'folder' modes).")
     parser.add_argument('--extra_viz', action='store_true', help="Generate extra visualizations (t-SNE, PCA, PHATE) in file/folder/umap mode.")
     parser.add_argument('--quantitative', action='store_true', help="Perform quantitative analysis (distribution distance, clustering) in file/folder/umap mode.")
+    parser.add_argument('--use_prealigned', action='store_true', help="Use pre-aligned/cropped images (skip StarDist and rotation).")
     
     args = parser.parse_args()
 
@@ -1137,7 +1239,7 @@ def main():
         output_dir = f"./screening_results/{timestamp}_{args.mode}_mode_aligned"
     
     try:
-        pipeline = MutantScreeningPipeline(args.model_dir)
+        pipeline = MutantScreeningPipeline(args.model_dir, use_prealigned=args.use_prealigned)
         generate_umap = (args.mode == 'umap') or args.umap
         
         if args.mode == 'file':
