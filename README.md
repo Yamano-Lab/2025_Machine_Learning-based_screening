@@ -16,10 +16,20 @@ ML_based_screening/
 │   ├── __init__.py           # パッケージ認識用（通常は触りません）
 │   ├── CAE_improved_modeltrain.py  # CAEモデルの学習
 │   ├── train_vae_vgg.py      # 高感度VAEモデルの学習
+│   ├── train_aligned_cae.py  # 位置合わせ済み画像のCAE学習
+│   ├── train_dual_channel_cae.py # 2チャンネル入力CAE学習
 │   ├── integrated_screening.py     # 学習済みモデルを用いたスクリーニング解析
+│   ├── integrated_screening_aligned.py # 位置合わせ済み画像のスクリーニング解析
+│   ├── create_aligned_dataset_v5.py # データセットの位置合わせ・前処理
+│   ├── visualize_average_error.py  # 平均再構成誤差の可視化
+│   ├── refine_anomaly_detector.py  # 異常検知器(OneClassSVM等)の再調整
+│   ├── inspect_dataset.py          # データセットの検査・可視化
 │   └── generate_image_only.py      # 画像生成用ヘルパー
 ├── Scripts/                  # 実行用のシェルスクリプト（ユーザーが触る場所）
+│   ├── align.sh              # 画像の位置合わせ実行用
 │   ├── run_train.sh          # 学習実行用
+│   ├── run_train_aligned.sh  # 位置合わせ済み画像の学習実行用
+│   ├── run_train_dual.sh     # Dual Channel CAE学習実行用
 │   ├── run_vae_training.sh   # VAE学習実行用
 │   └── run_analysis.sh       # 解析実行用
 ├── requirements.txt          # 必要なライブラリ一覧
@@ -48,12 +58,30 @@ pip install -r requirements.txt
 3. プログラムを実行する。
     ※実行前に `Scripts/` 内の各ファイルのパス設定を変更してください。
 
+    **前処理 (Preprocessing):**
+    画像の位置合わせとデータセット作成を行います。
+    ```bash
+    bash Scripts/align.sh
+    ```
+
     **学習を実行する場合:**
     
     *   **通常学習 (CAE):**
         （標準）形状の崩れなど、大きな形態変化を検出する場合に使用します。
         ```bash
         bash Scripts/run_train.sh
+        ```
+    
+    *   **位置合わせ済み学習 (Aligned CAE):**
+        位置合わせ済みのデータセットを用いて学習します。
+        ```bash
+        bash Scripts/run_train_aligned.sh
+        ```
+
+    *   **Dual Channel 学習:**
+        2つのチャンネル（例: 蛍光と明視野）を用いて学習します。
+        ```bash
+        bash Scripts/run_train_dual.sh
         ```
     
     *   **高感度学習 (VAE + VGG):**
