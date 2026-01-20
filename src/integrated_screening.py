@@ -147,33 +147,23 @@ class MutantScreeningPipeline:
             return []
 
     def compute_anomaly_scores(self, cell_images):
-        """細胞画像のリストから異常関連スコアを計算する (Test-Time Augmentation implemented)"""
+        """細胞画像のリストから異常関連スコアを計算する (回転なしバージョン)"""
         if len(cell_images) == 0: return {}
         
-        N = len(cell_images)
         # Original images: (N, 64, 64)
         X_orig = np.array(cell_images)
         
-        # 1. Generate 4 rotated versions for each image
-        # Rotations: 0, 90, 180, 270 degrees
-        X_0 = X_orig
-        X_90 = np.rot90(X_orig, k=1, axes=(1, 2))
-        X_180 = np.rot90(X_orig, k=2, axes=(1, 2))
-        X_270 = np.rot90(X_orig, k=3, axes=(1, 2))
-        
-        # Stack all: (N * 4, 64, 64)
-        X_aug = np.concatenate([X_0, X_90, X_180, X_270], axis=0)
-        
-        # Add channel dimension: (N * 4, 64, 64, 1)
-        X_aug = np.expand_dims(X_aug, axis=-1).astype('float32')
+        # --- 変更点 1: 回転処理 (np.rot90) と結合 (concatenate) を削除 ---
+        # そのまま channel 次元を追加します: (N, 64, 64, 1)
+        X_input = np.expand_dims(X_orig, axis=-1).astype('float32')
         
         # 2. Batch processing to avoid OOM
         batch_size = 32
         mse_list = []
         features_list = []
         
-        for i in range(0, len(X_aug), batch_size):
-            batch_X = X_aug[i:i + batch_size]
+        for i in range(0, len(X_input), batch_size):
+            batch_X = X_input[i:i + batch_size]
             
             # Reconstruction
             reconstructed = self.autoencoder.predict(batch_X, verbose=0)
@@ -185,21 +175,13 @@ class MutantScreeningPipeline:
             encoded_flat = encoded_features.reshape(len(encoded_features), -1)
             features_list.append(encoded_flat)
             
-        all_mse = np.concatenate(mse_list, axis=0) # (N * 4,)
-        all_features = np.concatenate(features_list, axis=0) # (N * 4, feature_dim)
+        all_mse = np.concatenate(mse_list, axis=0) # (N,)
+        all_features = np.concatenate(features_list, axis=0) # (N, feature_dim)
         
-        # 3. Pooling (Average) back to N cells
-        # Reshape to (4, N, ...) then transpose to (N, 4, ...) implies we stacked [N_0, N_90, ...]
-        # Actually we concatenated [X_0, X_90, ...], so first N are 0deg, next N are 90deg...
-        
-        # Reshape to (4, N)
-        all_mse_reshaped = all_mse.reshape(4, N).T # (N, 4)
-        # Reshape to (4, N, feature_dim)
-        all_features_reshaped = all_features.reshape(4, N, -1).transpose(1, 0, 2) # (N, 4, feature_dim)
-        
-        # Compute mean over rotations
-        final_mse = np.mean(all_mse_reshaped, axis=1) # (N,)
-        final_features_mean = np.mean(all_features_reshaped, axis=1) # (N, feature_dim)
+        # --- 変更点 2: 回転分の平均化 (Pooling) 処理を削除 ---
+        # 回転させていないので、計算結果がそのまま最終結果になります
+        final_mse = all_mse
+        final_features_mean = all_features
         
         # 4. Standard PCA & Anomaly Detection pipeline
         encoded_scaled = self.scaler.transform(final_features_mean)

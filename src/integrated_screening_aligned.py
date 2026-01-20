@@ -136,13 +136,7 @@ class MutantScreeningPipeline:
             raise
 
     def extract_quality_cells(self, image_path, enhance_contrast=False):
-        """単一のTIF画像から品質基準を満たし、アライメント済みの細胞画像を抽出する
-        Returns:
-            list of tuples: [(aligned_cell_2ch, aligned_cell_2ch), ...] 
-            (Returning same image twice to maintain compatibility with existing logic, 
-             or we can return (raw, processed) if we want different visualizations, 
-             but here 'processed' IS 'aligned'.)
-        """
+        """単一のTIF画像から品質基準を満たし、アライメント済みの細胞画像を抽出する"""
         try:
             if self.use_prealigned:
                 try:
@@ -175,9 +169,9 @@ class MutantScreeningPipeline:
             H, W = red_channel.shape
             
             for prop in props:
-                # 1. Edge Exclusion (Skip cells touching borders)
+                # 1. Strict Border Rejection (5px margin)
                 minr, minc, maxr, maxc = prop.bbox
-                if minr <= 1 or minc <= 1 or maxr >= H - 1 or maxc >= W - 1:
+                if minr < 5 or minc < 5 or maxr > H - 5 or maxc > W - 5:
                     continue
 
                 # 2. Strict Shape Filtering (Quality Control)
@@ -188,60 +182,85 @@ class MutantScreeningPipeline:
                 circularity = (4 * math.pi * prop.area) / (prop.perimeter ** 2) if prop.perimeter > 0 else 0
                 if circularity < 0.8: continue
 
-                h, w = maxr - minr, maxc - minc
-                margin = int(max(h, w) * 0.5)
+                # 3. Centroid-based Padding & Crop
+                cy, cx = map(int, prop.centroid)
                 
-                r_start = max(0, minr - margin)
-                r_end = min(red_channel.shape[0], maxr + margin)
-                c_start = max(0, minc - margin)
-                c_end = min(red_channel.shape[1], maxc + margin)
+                # Determine crop size (1.5x larger dimension, min 64)
+                bbox_h = maxr - minr
+                bbox_w = maxc - minc
+                size = int(max(bbox_h, bbox_w) * 1.5)
+                size = max(size, 64)
+                half_size = size // 2
                 
-                crop_red = red_channel[r_start:r_end, c_start:c_end]
-                crop_green = green_channel[r_start:r_end, c_start:c_end]
-                crop_mask = labels[r_start:r_end, c_start:c_end] == prop.label
+                # Calculate crop coordinates centered on centroid
+                r_start = cy - half_size
+                c_start = cx - half_size
+                r_end = r_start + size
+                c_end = c_start + size
+                
+                # Prepare padded containers
+                crop_red = np.zeros((size, size), dtype=red_channel.dtype)
+                crop_green = np.zeros((size, size), dtype=green_channel.dtype)
+                crop_mask = np.zeros((size, size), dtype=bool)
+                
+                # Calculate overlap
+                r_start_clamped = max(0, r_start)
+                r_end_clamped = min(H, r_end)
+                c_start_clamped = max(0, c_start)
+                c_end_clamped = min(W, c_end)
+                
+                # Destination indices
+                dr_start = r_start_clamped - r_start
+                dr_end = dr_start + (r_end_clamped - r_start_clamped)
+                dc_start = c_start_clamped - c_start
+                dc_end = dc_start + (c_end_clamped - c_start_clamped)
+                
+                if dr_end > dr_start and dc_end > dc_start:
+                    crop_red[dr_start:dr_end, dc_start:dc_end] = red_channel[r_start_clamped:r_end_clamped, c_start_clamped:c_end_clamped]
+                    crop_green[dr_start:dr_end, dc_start:dc_end] = green_channel[r_start_clamped:r_end_clamped, c_start_clamped:c_end_clamped]
+                    # Only mask the specific cell
+                    mask_slice = (labels[r_start_clamped:r_end_clamped, c_start_clamped:c_end_clamped] == prop.label)
+                    crop_mask[dr_start:dr_end, dc_start:dc_end] = mask_slice
+                else:
+                    continue
 
-                # 3. Mask Background
+                # Apply Mask
                 crop_red = crop_red * crop_mask
                 crop_green = crop_green * crop_mask
 
-                # 4. Alignment
-                # Calculate Centroid of Cell (Red)
-                m = regionprops(crop_mask.astype(int), intensity_image=crop_red)[0]
-                cy, cx = m.centroid
+                # 4. Alignment Logic
+                # Recalculate Centroid of Cell (Red) within crop
+                try:
+                    m = regionprops(crop_mask.astype(int), intensity_image=crop_red)[0]
+                    cy_crop, cx_crop = m.centroid
+                except IndexError:
+                    continue
                 
                 if np.max(crop_green) < p99_green * 0.1: continue
 
                 # Calculate Centroid of Pyrenoid (Green)
-                mg = regionprops(crop_mask.astype(int), intensity_image=crop_green)[0]
-                py, px = mg.weighted_centroid
-                
-                dy, dx = py - cy, px - cx
+                try:
+                    mg = regionprops(crop_mask.astype(int), intensity_image=crop_green)[0]
+                    py, px = mg.weighted_centroid
+                except IndexError:
+                    continue
+
+                dy, dx = py - cy_crop, px - cx_crop
                 
                 if dy**2 + dx**2 < 2.0:
                     angle = 0
                 else:
                     angle_rad = math.atan2(dy, dx)
                     angle_deg = math.degrees(angle_rad)
-                    # Rotate so pyrenoid is at bottom (90 degrees)
                     angle = angle_deg - 90
 
                 rotated_red = rotate(crop_red, angle, resize=False, preserve_range=True)
                 rotated_green = rotate(crop_green, angle, resize=False, preserve_range=True)
                 
-                # Crop & Resize
-                crop_size = 64
-                center_y, center_x = rotated_red.shape[0] // 2, rotated_red.shape[1] // 2
-                size = max(h, w)
-                y1 = max(0, center_y - size // 2)
-                y2 = min(rotated_red.shape[0], center_y + size // 2)
-                x1 = max(0, center_x - size // 2)
-                x2 = min(rotated_red.shape[1], center_x + size // 2)
-                
-                final_red = rotated_red[y1:y2, x1:x2]
-                final_green = rotated_green[y1:y2, x1:x2]
-                
-                final_red = resize(final_red, (crop_size, crop_size), anti_aliasing=True)
-                final_green = resize(final_green, (crop_size, crop_size), anti_aliasing=True)
+                # Final Resize to 64x64
+                final_crop_size = 64
+                final_red = resize(rotated_red, (final_crop_size, final_crop_size), anti_aliasing=True)
+                final_green = resize(rotated_green, (final_crop_size, final_crop_size), anti_aliasing=True)
                 
                 # 5. Normalize (99.9 percentile)
                 final_red = np.clip(final_red / p99_red, 0, 1)
@@ -249,9 +268,6 @@ class MutantScreeningPipeline:
 
                 aligned_cell = np.stack([final_red, final_green], axis=-1).astype(np.float32)
                 
-                # Return tuple (raw, processed) where processed is the aligned one.
-                # For "raw", we can just return the same aligned image for simplicity in this pipeline,
-                # as unaligned raw images are hard to compare with aligned reconstructions.
                 quality_cells.append((aligned_cell, aligned_cell))
                 
             return quality_cells
