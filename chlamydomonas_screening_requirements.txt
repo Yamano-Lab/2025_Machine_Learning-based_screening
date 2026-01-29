@@ -1,0 +1,828 @@
+================================================================================
+クラミドモナス・ピレノイド画像解析システム 要件定義書
+================================================================================
+
+文書バージョン: 1.0
+作成日: 2026年1月29日
+対象プロジェクト: クラミドモナス変異株の高速スクリーニングと表現型解析
+
+================================================================================
+目次
+================================================================================
+
+1. プロジェクト概要
+2. システム目的
+3. 現状分析
+4. 機能要件
+5. 非機能要件
+6. 実装優先度
+7. 成果物要件
+8. 論文化要件
+9. 付録: 技術仕様詳細
+
+================================================================================
+1. プロジェクト概要
+================================================================================
+
+【研究目的】
+クラミドモナス（Chlamydomonas reinhardtii）の変異株ライブラリーを対象に、
+ピレノイド形態を蛍光染色により可視化し、画像ベースの高速スクリーニングを
+実施する。異常な表現型を示す株（Hit株）を同定し、遺伝子解析・生理学解析を
+通じてピレノイド形成・維持に関わる新規因子を発見する。
+
+【最終目標】
+- 数千株規模の変異株スクリーニング
+- Hit株の同定と優先順位付け
+- 表現型-遺伝子型の相関解析
+- 国際学術誌（IF 5-10程度）への論文投稿
+
+【使用技術】
+- Python 3.8以上
+- TensorFlow/Keras (深層学習)
+- StarDist2D (細胞セグメンテーション)
+- UMAP (次元削減・可視化)
+- scikit-learn (機械学習・統計解析)
+
+================================================================================
+2. システム目的
+================================================================================
+
+【主要目的】
+1. 蛍光顕微鏡画像からの細胞自動検出・抽出
+2. ピレノイド形態の定量的評価
+3. 野生型からの逸脱度（異常度）の自動判定
+4. 表現型の多次元解析とクラスタリング
+5. 統計的に有意なHit株の同定
+6. 再現性の高い実験結果の生成
+
+【副次目的】
+- 人手による評価時間の削減（目標: 95%削減）
+- 評価の客観性・定量性の向上
+- データの一元管理と追跡可能性の確保
+- 将来的な他の表現型解析への拡張性
+
+================================================================================
+3. 現状分析
+================================================================================
+
+【既存コードの状況】
+✓ 実装済み:
+  - create_aligned_dataset_v5.py: 細胞抽出・アライメント
+  - train_aligned_cae.py: オートエンコーダー訓練
+  - integrated_screening_aligned_v2.py: スクリーニング実行
+
+✓ 強み:
+  - StarDist2Dによる高精度セグメンテーション
+  - 核-ピレノイド重心を基準とした細胞アライメント
+  - ハイブリッド損失関数（MSE + SSIM）による構造保持
+  - 多段階の形状フィルタリング（solidity, circularity等）
+
+✗ 課題:
+  - データ拡張が過度に制限的（回転禁止）
+  - 表現型の定量化が不十分（MSEのみ）
+  - 統計解析機能の欠如
+  - 遺伝子型-表現型の紐付け機能なし
+  - バリデーション機能の不足
+  - メモリ効率の問題（大規模データ時）
+
+================================================================================
+4. 機能要件
+================================================================================
+
+--------------------------------------------------------------------------------
+4.1 データセット作成機能（create_aligned_dataset_v5.py 改善）
+--------------------------------------------------------------------------------
+
+【要件 DS-001】アライメント精度の向上
+優先度: 高
+内容:
+  - アライメント判定閾値をパラメータ化（コマンドライン引数）
+  - デフォルト値: 5.0ピクセル（現状2.0から緩和）
+  - アライメント失敗をカウントする統計項目の追加
+  - stats辞書に 'alignment_failed' キーを追加
+
+実装内容:
+  ```
+  parser.add_argument('--alignment_threshold', type=float, default=5.0,
+                      help='Distance threshold for pyrenoid-nucleus alignment')
+  
+  # process_single_file内
+  if dy**2 + dx**2 < alignment_threshold:
+      stats['alignment_failed'] += 1
+      continue
+  ```
+
+【要件 DS-002】フィルタリング統計のCSV出力
+優先度: 高
+内容:
+  - 全ファイルの統計を集計してCSVで保存
+  - ファイル名: filtering_statistics.csv
+  - 含める列:
+    * total_detected: 検出総数
+    * border_rejected: 境界除外数
+    * size_rejected: サイズ除外数
+    * eccentricity_rejected: 離心率除外数
+    * solidity_rejected: 充実度除外数
+    * circularity_rejected: 真円度除外数
+    * alignment_failed: アライメント失敗数
+    * final_accepted: 最終保存数
+    * acceptance_rate: 受容率（保存数/検出数）
+
+実装内容:
+  新規関数 save_filtering_statistics(results, output_dir) を追加
+  mainメソッドの最後で呼び出し
+
+【要件 DS-003】低受容率時の警告システム
+優先度: 中
+内容:
+  - acceptance_rate < 20% の場合に警告を表示
+  - 推奨される閾値緩和案を自動提示
+  - 例: 
+    --solidity 0.81 (現在0.9の90%)
+    --circularity 0.72 (現在0.8の90%)
+    --eccentricity 1.00 (現在0.95の105%)
+
+実装内容:
+  mainメソッド内に条件分岐で警告文を追加
+
+【要件 DS-004】診断画像の強化
+優先度: 低
+内容:
+  - 除外理由ごとに色分けした可視化
+  - 統計サマリーをオーバーレイ表示
+
+--------------------------------------------------------------------------------
+4.2 モデル訓練機能（train_aligned_cae.py 改善）
+--------------------------------------------------------------------------------
+
+【要件 TR-001】データ拡張戦略の改善
+優先度: 高
+内容:
+  - rotation_range を 0 → 5 に変更（±5度の回転許可）
+  - zoom_range=0.05 を追加（軽微なズーム変動許可）
+  - これらをクラス初期化時のパラメータとして設定可能に
+
+実装内容:
+  ```
+  class AlignedAnomalyDetectionTraining:
+      def __init__(self, input_dir, output_dir, 
+                   rotation_range=5, zoom_range=0.05):
+          self.rotation_range = rotation_range
+          self.zoom_range = zoom_range
+          ...
+  
+  # train_autoencoder内
+  datagen = ImageDataGenerator(
+      rotation_range=self.rotation_range,
+      zoom_range=self.zoom_range,
+      ...
+  )
+  ```
+
+【要件 TR-002】異常スコア閾値解析の可視化
+優先度: 高
+内容:
+  - MSEスコアのヒストグラムと累積分布を2つのサブプロットで表示
+  - パーセンタイル（95th, 97.5th, 99th）での閾値を赤線表示
+  - ファイル名: threshold_analysis.png
+
+実装内容:
+  新規メソッド plot_anomaly_threshold_analysis(scores, percentile=95)
+  create_anomaly_detector内で呼び出し
+
+出力例:
+  ```
+  [左] ヒストグラム + 95パーセンタイル線
+  [右] 累積分布関数 + 閾値線
+  ```
+
+【要件 TR-003】メモリ効率的なデータローダー
+優先度: 中
+内容:
+  - 大規模データセット（10,000+画像）対応
+  - tf.keras.utils.Sequence を継承したジェネレータ
+  - バッチ単位でファイルを読み込み（全メモリロード回避）
+
+実装内容:
+  新規クラス AlignedDataGenerator:
+    - __init__(file_paths, batch_size=32, shuffle=True)
+    - __len__(): バッチ数を返す
+    - __getitem__(index): バッチデータを返す
+    - on_epoch_end(): エポック終了時シャッフル
+
+  train_autoencoderに use_generator オプション追加
+
+【要件 TR-004】UMAP可視化機能
+優先度: 高
+内容:
+  - エンコーダ特徴量を2次元UMAPで投影
+  - 表現型スコアでカラーマップ表示
+  - ファイル出力:
+    * umap_phenotype.png (可視化画像)
+    * umap_coordinates.csv (座標データ)
+
+実装内容:
+  新規メソッド visualize_umap_embedding(encoder, cell_images, metadata=None)
+  依存ライブラリ: umap-learn
+
+UMAP設定:
+  ```
+  n_neighbors=15
+  min_dist=0.1
+  metric='euclidean'
+  random_state=42
+  ```
+
+【要件 TR-005】訓練サマリーレポート生成
+優先度: 中
+内容:
+  - テキストファイルで訓練結果を記録
+  - ファイル名: training_summary.txt
+  - 含める情報:
+    * 訓練日時
+    * データセットサイズ
+    * 最終loss、最良loss
+    * エポック数
+    * MSE統計（平均、中央値、95/99パーセンタイル）
+    * 推奨閾値
+    * モデルアーキテクチャサマリー
+
+実装内容:
+  新規メソッド generate_training_summary(history, cell_images, autoencoder, mse_scores)
+  create_anomaly_detector内で呼び出し
+
+--------------------------------------------------------------------------------
+4.3 表現型定量化機能（新規ファイル: phenotype_quantification.py）
+--------------------------------------------------------------------------------
+
+【要件 PH-001】多次元表現型スコアリング
+優先度: 最高
+内容:
+  ピレノイド形態を以下の指標で定量化:
+    1. pyrenoid_size: ピレノイド面積（ピクセル数）
+    2. pyrenoid_intensity: 蛍光強度平均
+    3. pyrenoid_compactness: 円形度（4π面積/周長²）
+    4. localization_score: 期待位置（下部中央）からの距離
+    5. red_green_ratio: 核/ピレノイド蛍光比
+    6. morphology_score: オートエンコーダー再構成誤差（MSE）
+    7. overall_phenotype: 統合スコア
+
+実装内容:
+  クラス PhenotypicScoring:
+    - calculate_phenotype_scores(cell_image, reconstruction_error) → dict
+    - batch_score_cells(cell_images, reconstruction_errors) → pd.DataFrame
+    - _calculate_compactness(mask) → float
+    - _calculate_localization_error(mask) → float
+    - _integrate_scores(...) → float
+
+技術詳細:
+  - 緑チャネルの75パーセンタイルで閾値処理
+  - binary_closing で穴埋め
+  - skimage.measure.regionprops で形状特徴抽出
+  - 期待位置: (y=48, x=32) ← 64x64画像の下部中央
+
+【要件 PH-002】バッチ処理機能
+優先度: 高
+内容:
+  - 複数細胞の一括スコアリング
+  - DataFrameで結果を返す
+  - cell_id列で個別細胞を追跡
+
+--------------------------------------------------------------------------------
+4.4 統計解析機能（新規ファイル: statistical_analysis.py）
+--------------------------------------------------------------------------------
+
+【要件 ST-001】変異株-野生型比較
+優先度: 最高
+内容:
+  - 各変異株の表現型を野生型と統計検定
+  - 使用検定: Mann-Whitney U検定（ノンパラメトリック）
+  - 効果量: Cohen's d
+  - 多重検定補正: Benjamini-Hochberg FDR法
+
+実装内容:
+  クラス StatisticalComparison:
+    - compare_mutants_to_wildtype(mutant_data, wildtype_data, phenotype_columns)
+      → pd.DataFrame with columns:
+        * strain_id
+        * phenotype
+        * p_value
+        * p_adjusted (FDR補正後)
+        * effect_size (Cohen's d)
+        * wt_mean, wt_std
+        * mutant_mean, mutant_std
+        * n_wt, n_mutant
+        * fold_change
+        * is_significant (p_adjusted < 0.05)
+
+【要件 ST-002】Hit株の同定
+優先度: 最高
+内容:
+  - 有意な表現型変化を示す株を抽出
+  - デフォルト基準:
+    * p_adjusted < 0.05
+    * |Cohen's d| > 0.8 (中程度以上の効果量)
+
+実装内容:
+  - identify_hit_strains(comparison_results, effect_size_threshold, p_threshold)
+    → pd.DataFrame:
+      * strain_id
+      * affected_phenotypes (カンマ区切り)
+      * avg_effect_size
+      * min_p_adjusted
+
+【要件 ST-003】分類精度の検証
+優先度: 中
+内容:
+  - 自動分類と人手評価の一致率検証
+  - 出力指標:
+    * Confusion matrix
+    * Cohen's Kappa
+    * Precision, Recall, F1-score
+
+実装内容:
+  - validate_classification_accuracy(automated_labels, manual_labels)
+    → dict with sklearn.metrics結果
+
+--------------------------------------------------------------------------------
+4.5 遺伝子型-表現型統合機能（新規ファイル: genotype_phenotype_integration.py）
+--------------------------------------------------------------------------------
+
+【要件 GP-001】メタデータ統合
+優先度: 高
+内容:
+  - 変異株メタデータCSVと表現型データの結合
+  - 必須列（メタデータCSV）:
+    * strain_id: 株ID（一意識別子）
+    * gene_name: 変異遺伝子名
+    * mutation_type: 変異タイプ（deletion, insertion, point mutation等）
+    * strain_type: 'wildtype' または 'mutant'
+
+実装内容:
+  クラス GenotypePhenotypeDatabase:
+    - __init__(metadata_csv)
+    - integrate_screening_results(screening_output_dir)
+      → self.integrated_data (pd.DataFrame)
+    - identify_hit_strains(threshold_percentile=95)
+      → pd.DataFrame (hit株リスト)
+
+【要件 GP-002】スクリーニング結果の自動収集
+優先度: 高
+内容:
+  - 各strain_idディレクトリから phenotype_scores.csv を収集
+  - メタデータとマージして統合データベース作成
+
+ディレクトリ構造例:
+  ```
+  screening_output/
+  ├── WT001/
+  │   └── phenotype_scores.csv
+  ├── MUT001/
+  │   └── phenotype_scores.csv
+  ├── MUT002/
+  │   └── phenotype_scores.csv
+  ...
+  ```
+
+--------------------------------------------------------------------------------
+4.6 パイプライン実行機能（新規ファイル: run_pipeline.py）
+--------------------------------------------------------------------------------
+
+【要件 PP-001】エンドツーエンド自動実行
+優先度: 中
+内容:
+  - データセット作成 → 訓練 → スクリーニング を一括実行
+  - 進行状況をログファイルに記録
+  - エラー時のクリーンアップ処理
+
+実装内容:
+  コマンドライン引数:
+    --input_dir: 元画像ディレクトリ（必須）
+    --output_base: 出力ルートディレクトリ（デフォルト: ./output）
+    --workers: 並列処理数（デフォルト: -1）
+    --skip_dataset: データセット作成をスキップ
+    --skip_training: 訓練をスキップ
+
+  処理フロー:
+    1. create_aligned_dataset_v5.py を subprocess で実行
+    2. 返り値コードをチェック
+    3. train_aligned_cae.py を実行
+    4. 各ステップの開始・終了時刻をログ記録
+
+ログファイル: pipeline_log_YYYYMMDD_HHMMSS.txt
+
+【要件 PP-002】チェックポイント・リカバリ機能
+優先度: 低
+内容:
+  - 中断時に再開可能な仕組み
+  - 各ステップの完了フラグファイル
+
+================================================================================
+5. 非機能要件
+================================================================================
+
+【性能要件】
+- NFR-001: 1画像あたりの処理時間: 平均 < 2秒（細胞検出+抽出）
+- NFR-002: オートエンコーダー訓練時間: 1000細胞で < 1時間（GPU使用時）
+- NFR-003: メモリ使用量: 16GB RAM環境で10,000細胞処理可能
+
+【拡張性要件】
+- NFR-004: 他の表現型（ミトコンドリア、アイスポット等）への拡張容易性
+- NFR-005: 異なる種（Volvox等）への適用可能性
+
+【保守性要件】
+- NFR-006: 全コードにdocstring（Google形式）を記述
+- NFR-007: 主要関数に型ヒント（Type Hints）を追加
+- NFR-008: 単体テスト（pytest）のカバレッジ > 70%
+
+【移植性要件】
+- NFR-009: Linux, macOS, Windows対応
+- NFR-010: Python 3.8-3.11互換
+
+【データ要件】
+- NFR-011: 全中間ファイルにタイムスタンプ付きメタデータ
+- NFR-012: 実験パラメータをYAML設定ファイルで管理
+- NFR-013: データバージョン管理（DVC推奨）
+
+【ドキュメント要件】
+- NFR-014: README.md にインストール手順
+- NFR-015: チュートリアル Jupyter Notebook
+- NFR-016: API仕様書（Sphinx自動生成）
+
+================================================================================
+6. 実装優先度
+================================================================================
+
+【フェーズ1: 基盤強化（1-2週間）】
+優先度: 最高
+対象要件:
+  - DS-001: アライメント閾値パラメータ化
+  - DS-002: 統計CSV出力
+  - TR-001: データ拡張改善
+  - TR-002: 閾値解析可視化
+  - PH-001: 表現型スコアリング（最重要）
+
+成果物:
+  - 改善版 create_aligned_dataset_v5.py
+  - 改善版 train_aligned_cae.py
+  - 新規 phenotype_quantification.py
+
+【フェーズ2: 解析機能追加（2-3週間）】
+優先度: 高
+対象要件:
+  - ST-001: 統計比較
+  - ST-002: Hit株同定
+  - TR-004: UMAP可視化
+  - GP-001: メタデータ統合
+
+成果物:
+  - 新規 statistical_analysis.py
+  - 新規 genotype_phenotype_integration.py
+  - UMAPプロット群
+  - Hit株リスト
+
+【フェーズ3: 効率化・自動化（1週間）】
+優先度: 中
+対象要件:
+  - TR-003: メモリ効率化
+  - TR-005: 訓練サマリー
+  - PP-001: パイプライン自動実行
+
+成果物:
+  - 新規 run_pipeline.py
+  - データジェネレータ実装
+  - 自動レポート機能
+
+【フェーズ4: バリデーション・ドキュメント（1-2週間）】
+優先度: 中-低
+対象要件:
+  - ST-003: 分類精度検証
+  - DS-003: 警告システム
+  - NFR-006~016: ドキュメント整備
+
+成果物:
+  - バリデーション結果レポート
+  - README.md
+  - チュートリアル notebook
+  - 単体テスト
+
+================================================================================
+7. 成果物要件
+================================================================================
+
+【ソースコード】
+1. create_aligned_dataset_v6.py (改善版)
+2. train_aligned_cae_v2.py (改善版)
+3. phenotype_quantification.py (新規)
+4. statistical_analysis.py (新規)
+5. genotype_phenotype_integration.py (新規)
+6. run_pipeline.py (新規)
+7. config.yaml (設定ファイル)
+
+【データファイル】
+1. filtering_statistics.csv
+2. training_summary.txt
+3. threshold_analysis.png
+4. umap_phenotype.png
+5. umap_coordinates.csv
+6. comparison_results.csv (統計検定結果)
+7. hit_strains.csv (Hit株リスト)
+
+【ドキュメント】
+1. README.md
+2. INSTALLATION.md
+3. TUTORIAL.ipynb
+4. API_REFERENCE.html (Sphinx生成)
+5. 本要件定義書
+
+【検証データ】
+1. validation_report.pdf
+2. confusion_matrix.png
+3. phenotype_correlation_matrix.png
+
+================================================================================
+8. 論文化要件
+================================================================================
+
+【論文投稿に必要な最小限の追加実験・解析】
+
+【Phase A: データ品質保証（1-2週間）】
+- 野生型50-100サンプルで人手評価を実施
+- 自動分類精度の検証（目標: Cohen's Kappa > 0.8）
+- バッチ効果の評価と補正
+
+【Phase B: Hit株の生物学的検証（1-2ヶ月）】
+- Top 10-20 Hit株の選定（統計的有意性に基づく）
+- 生理学的測定:
+  * CO2固定速度
+  * 光合成効率（Fv/Fm等）
+  * 成長速度
+- 画像表現型と生理データの相関解析
+- 代表株の電子顕微鏡観察（オプション）
+
+【Phase C: 遺伝子解析（2-3ヶ月）】
+- 変異株の原因遺伝子同定
+  * 既知変異株: アノテーション確認
+  * ランダム変異株: マッピング/シーケンシング
+- GOエンリッチメント解析
+- パスウェイ解析（KEGG等）
+
+【論文構成案】
+
+Title (例):
+"High-throughput image-based screening reveals novel regulators of 
+pyrenoid morphology in Chlamydomonas reinhardtii"
+
+Abstract:
+  - 背景: ピレノイドの重要性
+  - 方法: 画像解析パイプライン概要
+  - 結果: Hit株数、新規遺伝子発見
+  - 意義: 光合成研究への貢献
+
+Introduction:
+  - ピレノイドの生物学的重要性
+  - 既存研究の限界
+  - 本研究の目的
+
+Methods:
+  - 細胞培養・蛍光染色
+  - 画像取得条件
+  - 自動解析パイプライン（本システム）
+  - 統計解析手法
+  - 生理学的測定プロトコル
+  - 遺伝子解析手法
+
+Results:
+  - スクリーニング概要統計
+  - 表現型分布とクラスタリング（UMAP）
+  - Hit株の同定（統計検定結果）
+  - 代表株の詳細解析
+  - 遺伝子-表現型相関
+  - 生理学的検証結果
+
+Discussion:
+  - 発見した遺伝子の機能推定
+  - 既知パスウェイとの関連
+  - 手法の新規性と汎用性
+  - 限界と今後の展望
+
+Supplementary Materials:
+  - 全Hit株リスト
+  - 統計検定詳細
+  - ソースコード（GitHubリンク）
+  - データセット（公開リポジトリ）
+
+【推奨投稿先】
+
+Tier 1 (IF > 10): 画期的発見がある場合
+  - Plant Cell (IF ~12)
+  - Nature Plants (IF ~18)
+
+Tier 2 (IF 5-10): 現実的な目標
+  - Plant Physiology (IF ~7) ← 推奨
+  - New Phytologist (IF ~9)
+  - Plant Journal (IF ~7)
+
+Tier 3 (IF 3-5): 確実な採択
+  - Frontiers in Plant Science
+  - Journal of Experimental Botany
+  - Algal Research
+
+【論文採択のための品質基準】
+
+必須要件:
+✓ サンプル数: 各株 n≥30細胞、独立実験 ≥3回
+✓ 統計検定: 多重検定補正済み
+✓ バリデーション: 人手評価との一致率 >80%
+✓ 生理学データ: 少なくとも2つの指標（CO2固定、Fv/Fm等）
+✓ 遺伝子解析: 5-10株の原因遺伝子同定
+
+推奨要件:
+- 電子顕微鏡画像: 2-3株
+- 相補実験: 1-2株
+- タンパク質局在解析: GFP融合等
+
+【論文執筆スケジュール】
+- 実験・解析: 3-4ヶ月
+- 論文執筆: 1ヶ月
+- 共著者レビュー: 2週間
+- 投稿準備: 1週間
+合計: 約5ヶ月
+
+================================================================================
+9. 付録: 技術仕様詳細
+================================================================================
+
+【A. データ形式仕様】
+
+入力画像:
+  - ファイル形式: TIFF (multi-channel)
+  - サイズ: 2048x2048 pixels (typical)
+  - チャンネル:
+    * Ch0 (Red): 核染色（Hoechst等）
+    * Ch1 (Green): ピレノイド染色（カスタムプローブ）
+    * Ch2 (オプション): セグメンテーション用（明視野等）
+  - ビット深度: 16-bit
+  - ピクセルサイズ: 0.065 µm/pixel (63x対物レンズ)
+
+出力画像（アライメント済み細胞）:
+  - ファイル形式: TIFF (float32)
+  - サイズ: 64x64 pixels
+  - チャンネル: 2 (Red, Green)
+  - 値範囲: [0, 1] (正規化済み)
+
+【B. フィルタリングパラメータ推奨値】
+
+形状フィルタ:
+  - area: 200 - 8000 pixels
+  - solidity: > 0.9 (デフォルト) / > 0.8 (緩和時)
+  - circularity: > 0.8 (デフォルト) / > 0.7 (緩和時)
+  - eccentricity: < 0.95 (デフォルト) / < 0.98 (緩和時)
+
+境界除外:
+  - border_margin: 5 pixels (画像端から)
+
+【C. オートエンコーダーアーキテクチャ】
+
+Encoder:
+  Input: (64, 64, 2)
+  Conv2D(64) → BN → LeakyReLU → Stride(2,2) → (32, 32, 64)
+  Conv2D(128) → BN → LeakyReLU → Stride(2,2) → (16, 16, 128)
+  Conv2D(256) → BN → LeakyReLU → Stride(1,1) → (16, 16, 256)
+
+Decoder:
+  Input: (16, 16, 256)
+  Conv2D(256) → BN → LeakyReLU → (16, 16, 256)
+  Conv2D(128) → BN → LeakyReLU → UpSampling(2,2) → (32, 32, 128)
+  Conv2D(64) → BN → LeakyReLU → UpSampling(2,2) → (64, 64, 64)
+  Conv2D(2, activation='sigmoid') → (64, 64, 2)
+
+損失関数:
+  Hybrid Loss = MSE_red + 20.0 * MSE_green + 2.0 * (1 - SSIM)
+
+訓練設定:
+  - optimizer: Adam (lr=0.0001)
+  - batch_size: 32
+  - epochs: 300 (early stopping patience=20)
+  - validation_split: 0.2
+
+【D. UMAP設定】
+
+推奨パラメータ:
+  - n_neighbors: 15
+  - min_dist: 0.1
+  - metric: 'euclidean'
+  - n_components: 2
+  - random_state: 42
+
+入力データ:
+  - Encoder特徴量（16x16x256 = 65536次元を flatten）
+  - 事前に PCA で 100次元に削減（オプション）
+
+【E. 統計検定設定】
+
+検定手法:
+  - 2群比較: Mann-Whitney U検定（両側）
+  - 効果量: Cohen's d
+  - 多重検定補正: Benjamini-Hochberg FDR法
+  - 有意水準: α = 0.05
+
+Hit株判定基準:
+  - p_adjusted < 0.05 AND
+  - |Cohen's d| > 0.8 (中程度以上の効果)
+
+【F. ファイル命名規則】
+
+細胞画像:
+  {original_filename}_cell_{index:04d}.tif
+  例: exp001_pos01_cell_0042.tif
+
+統計結果:
+  comparison_{date}_{phenotype}.csv
+  例: comparison_20260129_pyrenoid_size.csv
+
+モデルファイル:
+  {model_type}_{date}_{version}.keras
+  例: autoencoder_20260129_v2.keras
+
+【G. 依存ライブラリバージョン】
+
+必須:
+  - Python >= 3.8
+  - numpy >= 1.21.0
+  - pandas >= 1.3.0
+  - scikit-image >= 0.18.0
+  - scikit-learn >= 1.0.0
+  - scipy >= 1.7.0
+  - matplotlib >= 3.4.0
+  - tifffile >= 2021.8.0
+  - tensorflow >= 2.8.0
+  - stardist >= 0.8.0
+  - csbdeep >= 0.7.0
+
+推奨:
+  - umap-learn >= 0.5.0
+  - seaborn >= 0.11.0
+  - statsmodels >= 0.13.0
+  - joblib >= 1.1.0
+
+開発用:
+  - pytest >= 6.2.0
+  - black >= 21.0
+  - flake8 >= 4.0.0
+  - sphinx >= 4.0.0
+
+【H. 計算リソース要件】
+
+最小構成:
+  - CPU: 4コア
+  - RAM: 16 GB
+  - GPU: オプション（訓練高速化）
+  - ストレージ: 100 GB（10,000細胞分）
+
+推奨構成:
+  - CPU: 8コア以上
+  - RAM: 32 GB以上
+  - GPU: NVIDIA RTX 3060以上（VRAM 6GB+）
+  - ストレージ: 500 GB SSD
+
+【I. 品質保証チェックリスト】
+
+データセット作成:
+  □ acceptance_rate > 20%
+  □ 診断画像で目視確認
+  □ 細胞サイズ分布が正常（200-8000 pixels）
+  □ アライメント失敗率 < 10%
+
+モデル訓練:
+  □ 訓練loss収束（early stopping作動）
+  □ validation loss < 0.01
+  □ 再構成画像が視覚的に妥当
+  □ UMAP plot でクラスター確認
+
+統計解析:
+  □ 野生型n ≥ 100
+  □ 各変異株n ≥ 30
+  □ 多重検定補正実施
+  □ 効果量計算完了
+
+論文化:
+  □ バリデーション（Kappa > 0.8）
+  □ 独立実験 ≥ 3回
+  □ 生理学データ取得
+  □ 遺伝子解析完了
+
+================================================================================
+10. 改訂履歴
+================================================================================
+
+バージョン 1.0 (2026-01-29)
+  - 初版作成
+  - 全機能要件定義
+  - 論文化要件追加
+  - 技術仕様詳細記載
+
+================================================================================
+本要件定義書に基づき、段階的な実装を推奨します。
+不明点は開発チームとの協議により解決してください。
+================================================================================
