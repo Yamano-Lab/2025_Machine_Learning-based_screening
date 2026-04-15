@@ -518,6 +518,7 @@ class MutantScreeningPipeline:
         
         # --- 4. Process Samples (Compute Scores) ---
         summary_results, detailed_results, analysis_data = {}, [], {'features': [], 'sample_name': [], 'is_anomaly': [], 'mse': [], 'anomaly_score': []}
+        all_clean_cells = [] # Store all images for average calculation
         
         # Group by sample
         unique_samples = sorted(list(set(d['sample'] for d in filtered_data)))
@@ -529,6 +530,8 @@ class MutantScreeningPipeline:
             sample_cells = [d['pre'] for d in sample_entries]
             
             if not sample_cells: continue
+            
+            all_clean_cells.extend(sample_cells)
             
             scores = self.compute_anomaly_scores(sample_cells)
             
@@ -571,7 +574,7 @@ class MutantScreeningPipeline:
         df_summary.to_csv(os.path.join(output_dir, 'summary_folder_mode.csv'))
         df_detailed.to_csv(os.path.join(output_dir, 'detailed_results_folder_mode.csv'), index=False)
         self.plot_anomaly_rates(df_summary, output_dir, wt_thresholds, "Folder")
-        self.plot_violin(df_detailed, output_dir, wt_thresholds, "Folder")
+        self.plot_violin(df_detailed, df_summary, output_dir, wt_thresholds, "Folder")
         self.generate_phenotype_mosaic(df_summary, df_detailed, output_dir, wt_thresholds, mode='folder')
         
         # --- Run XAI Analysis ---
@@ -641,7 +644,7 @@ class MutantScreeningPipeline:
 
             if run_quantitative:
                 self.calculate_distribution_distances(df_detailed, output_dir)
-                self.perform_clustering_analysis(all_features_pca, analysis_df, output_dir, color_map, df_detailed)
+                self.perform_clustering_analysis(all_features_pca, analysis_df, output_dir, color_map, df_detailed, images=all_clean_cells)
         
         print(f"Folder mode processing complete. Results are in {output_dir}")
 
@@ -751,7 +754,7 @@ class MutantScreeningPipeline:
         df_summary.to_csv(os.path.join(output_dir, 'summary_file_mode.csv'))
         df_detailed.to_csv(os.path.join(output_dir, 'detailed_results_file_mode.csv'), index=False)
         self.plot_anomaly_rates(df_summary, output_dir, wt_thresholds, "File")
-        self.plot_violin(df_detailed, output_dir, wt_thresholds, "File")
+        self.plot_violin(df_detailed, df_summary, output_dir, wt_thresholds, "File")
         self.generate_phenotype_mosaic(df_summary, df_detailed, output_dir, wt_thresholds, mode='file')
         
         # --- XAI ---
@@ -898,6 +901,13 @@ class MutantScreeningPipeline:
 
     # --- Standard Visualization Methods ---
     def plot_anomaly_rates(self, df, output_dir, thresholds, mode_name):
+        # Sort samples to have WT first
+        wt_samples = sorted([s for s in df['sample_name'].unique() if 'WT' in s.upper() or s.upper() == 'WT'])
+        other_samples = sorted([s for s in df['sample_name'].unique() if not ('WT' in s.upper() or s.upper() == 'WT')])
+        order = wt_samples + other_samples
+        df['sample_name'] = pd.Categorical(df['sample_name'], categories=order, ordered=True)
+        df = df.sort_values('sample_name').reset_index(drop=True)
+        
         plt.figure(figsize=(14, 7))
         names = [n[:20] for n in df['sample_name']]
         colors = ['#333333' if is_wt else '#E69F00' for is_wt in df['is_wt']]
@@ -908,22 +918,41 @@ class MutantScreeningPipeline:
         plt.ylabel('Anomaly Rate (%)'); plt.title(f'Anomaly Rates by Sample ({mode_name} Mode)'); plt.legend(); plt.tight_layout()
         plt.savefig(os.path.join(output_dir, f'plot_anomaly_rates_{mode_name.lower()}.png'), dpi=300, bbox_inches='tight'); plt.close()
 
-    def plot_violin(self, df_detailed, output_dir, thresholds, mode_name):
+    def plot_violin(self, df_detailed, df_summary, output_dir, thresholds, mode_name):
         print("  Generating Violin Plot...")
         samples = df_detailed['sample_name'].unique()
-        wt_name = next((s for s in samples if s.upper() == 'WT'), None)
+        
+        # Sort samples to have WT first, consistent with bar plot
+        wt_samples = sorted([s for s in samples if 'WT' in s.upper() or s.upper() == 'WT'])
+        other_samples = sorted([s for s in samples if not ('WT' in s.upper() or s.upper() == 'WT')])
+        order = wt_samples + other_samples
+
+        # Define a palette: WT (black), Hit (orange), Other (blue)
+        hit_threshold = thresholds.get('threshold', 9999) / 100.0  # Convert % to 0-1 scale
+        palette = {}
+        for sample_name in order:
+            is_wt = 'WT' in sample_name.upper() or sample_name.upper() == 'WT'
+            # df_summary has sample names as index
+            is_hit = not is_wt and sample_name in df_summary.index and df_summary.loc[sample_name, 'anomaly_rate'] >= hit_threshold
+            
+            if is_wt:
+                palette[sample_name] = '#333333'  # Dark Gray for WT
+            elif is_hit:
+                palette[sample_name] = '#D55E00'  # Orange for "Hit"
+            else:
+                palette[sample_name] = '#0072B2'  # Blue for others
 
         plt.figure(figsize=(14, 8))
-        order = [wt_name] + sorted([s for s in samples if s.upper() != 'WT']) if wt_name else sorted(samples)
-        
         sns.violinplot(x='sample_name', y='anomaly_score', hue='sample_name', legend=False, 
-                       data=df_detailed, order=order, palette=self.okabe_ito, inner='quartile')
+                       data=df_detailed, order=order, palette=palette, inner='quartile')
         
         plt.axhline(thresholds['p99_score'], color='#D55E00', linestyle='--', linewidth=2, label=f'WT 99th Percentile ({thresholds["p99_score"]:.2f})')
         plt.legend(loc='upper right'); plt.title(f'Anomaly Score Distribution ({mode_name} Mode)'); plt.ylabel('Anomaly Score (Higher = More Abnormal)'); plt.xlabel('Sample')
         plt.xticks(rotation=45, ha='right'); plt.tight_layout()
         plt.savefig(os.path.join(output_dir, f'plot_violin_{mode_name.lower()}.png'), dpi=300, bbox_inches='tight'); plt.close()
 
+        # For individual WT vs Mutant plots, identify a single WT to compare against
+        wt_name = wt_samples[0] if wt_samples else None
         if wt_name and mode_name.lower() == 'folder':
             mutants = [s for s in samples if s != wt_name]
             for mutant in mutants:
@@ -1084,39 +1113,123 @@ class MutantScreeningPipeline:
         df_dist = pd.DataFrame.from_dict(distances, orient='index', columns=['wasserstein_distance_from_WT']).sort_values(by='wasserstein_distance_from_WT', ascending=False)
         df_dist.to_csv(os.path.join(output_dir, 'quantitative_distribution_distances.csv'))
 
-    def perform_clustering_analysis(self, features, df, output_dir, color_map, df_detailed):
-        print("  Performing K-Means clustering (k=10)...")
+    def perform_clustering_analysis(self, features, df, output_dir, color_map, df_detailed, images=None):
+        print("  Performing Clustering Analysis (K-Means) with k=10...")
         from sklearn.cluster import KMeans
         
-        kmeans = KMeans(n_clusters=10, random_state=42, n_init=10)
+        k = 10
+        
+        # 1. Clustering
+        print(f"      Processing k={k}...")
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
         cluster_labels = kmeans.fit_predict(features)
         
-        df['cluster'] = cluster_labels
-        if len(df) == len(df_detailed):
-             df_detailed['cluster'] = df['cluster'].values
-        else:
-             print("Warning: df and df_detailed length mismatch. Skipping cluster sync.")
-
-        composition = df.groupby(['sample', 'cluster']).size().unstack(fill_value=0)
-        composition_perc = composition.div(composition.sum(axis=1), axis=0) * 100
-        composition_perc.to_csv(os.path.join(output_dir, 'quantitative_clustering_composition_k10.csv'))
+        # 2. Save Data for k=10
+        k_dir = os.path.join(output_dir, f"Clustering_k{k}")
+        os.makedirs(k_dir, exist_ok=True)
         
+        # Create temp copies for this k
+        df_k = df.copy()
+        df_k['cluster'] = cluster_labels
+        
+        df_detailed_k = df_detailed.copy()
+        if len(df_k) == len(df_detailed_k):
+             df_detailed_k['cluster'] = df_k['cluster'].values
+        else:
+             # Should not happen ideally
+             pass
+
+        # Save Composition
+        composition = df_k.groupby(['sample', 'cluster']).size().unstack(fill_value=0)
+        composition_perc = composition.div(composition.sum(axis=1), axis=0) * 100
+        composition_perc.to_csv(os.path.join(k_dir, f'composition_k{k}.csv'))
+        
+        # Save Diff & Heatmap
         wt_name = next((s for s in composition_perc.index if s.upper() == 'WT' or 'WT' in s.upper()), None)
         if wt_name:
             wt_comp = composition_perc.loc[wt_name]
             diff_df = composition_perc.subtract(wt_comp, axis=1)
-            diff_df.to_csv(os.path.join(output_dir, 'quantitative_clustering_diff_k10.csv'))
+            diff_df.to_csv(os.path.join(k_dir, f'composition_diff_k{k}.csv'))
             
             plt.figure(figsize=(12, len(diff_df) * 0.6 + 2))
             sns.heatmap(diff_df, annot=True, fmt='.1f', cmap='RdBu_r', center=0, vmax=30, vmin=-30)
-            plt.title('Cluster Composition Difference from WT (%)\n(Red = More than WT, Blue = Less than WT)')
-            plt.xlabel('Phenotype Cluster ID (1-10)'); plt.ylabel('Sample'); plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, 'quantitative_clustering_diff_heatmap_k10.png'), dpi=300, bbox_inches='tight'); plt.close()
-            print(f"  Saved Difference Heatmap to {os.path.join(output_dir, 'quantitative_clustering_diff_heatmap_k10.png')}")
-        else:
-            print("  [Warning] WT sample not found. Skipping difference heatmap.")
+            plt.title(f'Cluster Composition Difference from WT (%, k={k})')
+            plt.xlabel(f'Phenotype Cluster ID (0-{k-1})'); plt.ylabel('Sample'); plt.tight_layout()
+            plt.savefig(os.path.join(k_dir, f'composition_diff_heatmap_k{k}.png'), dpi=300, bbox_inches='tight'); plt.close()
+        
+        # Save Gallery
+        self._generate_cluster_gallery(df_detailed_k, k_dir)
+        
+        # Save Averages (if images provided)
+        if images is not None and len(images) > 0:
+            self._generate_cluster_averages(images, df_detailed_k, k_dir)
 
-        self._generate_cluster_gallery(df_detailed, output_dir)
+        print(f"\n    Clustering for k=10 complete.")
+
+    def _generate_cluster_averages(self, images, df, output_dir):
+        print("  Generating Cluster Average Images...")
+        cluster_avg_dir = os.path.join(output_dir, "Cluster_Averages")
+        os.makedirs(cluster_avg_dir, exist_ok=True)
+        
+        # Ensure images is numpy array for easy indexing
+        images = np.array(images)
+        
+        if 'cluster' not in df.columns:
+            print("    [Warning] 'cluster' column not found in dataframe. Skipping.")
+            return
+
+        unique_clusters = sorted(df['cluster'].unique())
+        avg_images = []
+        
+        for c in unique_clusters:
+            # Get indices for this cluster
+            # df indices are expected to be 0..N corresponding to images
+            indices = df.index[df['cluster'] == c].tolist()
+            
+            if not indices: continue
+            
+            cluster_imgs = images[indices]
+            if len(cluster_imgs) == 0: continue
+            
+            mean_img = np.mean(cluster_imgs, axis=0)
+            
+            # Convert to RGB for visualization
+            vis_img = self.visualize_2ch(mean_img) # Returns float 0..1
+            
+            # Save individual
+            plt.figure(figsize=(4,4))
+            plt.imshow(vis_img)
+            plt.axis('off')
+            plt.title(f"Cluster {c}\n(n={len(indices)})")
+            plt.savefig(os.path.join(cluster_avg_dir, f"average_cluster_{c}.png"), dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            avg_images.append((c, vis_img))
+
+        # Summary Image (Grid)
+        if not avg_images: return
+        
+        n_clusters = len(avg_images)
+        n_cols = 5
+        n_rows = math.ceil(n_clusters / n_cols)
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 3, n_rows * 3))
+        if n_clusters == 1: axes = np.array([axes])
+        axes = axes.flatten()
+        
+        for i, (c, img) in enumerate(avg_images):
+            axes[i].imshow(img)
+            axes[i].axis('off')
+            axes[i].set_title(f"Cluster {c}")
+            
+        # Hide empty subplots
+        for j in range(i+1, len(axes)):
+            axes[j].axis('off')
+            
+        plt.suptitle("Cluster Average Images (Mean of Aligned Cells)", fontsize=16)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "Cluster_Average_Summary.png"), dpi=300, bbox_inches='tight')
+        plt.close()
 
     def _generate_cluster_gallery(self, df_detailed, output_dir):
         if 'cluster' not in df_detailed.columns: return

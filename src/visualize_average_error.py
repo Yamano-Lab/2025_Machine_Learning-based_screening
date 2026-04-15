@@ -49,7 +49,7 @@ def get_average_error_map(folder_path, model, batch_size=32):
     if count == 0: return None
     return accumulated_diff / count
 
-def visualize_differential(input_dir, model_dir, output_dir, wt_folder_name='WT'):
+def visualize_differential(input_dir, model_dir, output_dir, wt_folder_name='WT', heatmap_range=None, normalize=False):
     print(f"Loading model from {model_dir}...")
     autoencoder = load_model(os.path.join(model_dir, 'best_autoencoder.keras'), compile=False)
     
@@ -67,45 +67,85 @@ def visualize_differential(input_dir, model_dir, output_dir, wt_folder_name='WT'
     os.makedirs(output_dir, exist_ok=True)
     
     # 2. 各変異株との差分を計算
-    print("=== Step 2: Calculating Differential Maps ===")
-    subfolders = [f.path for f in os.scandir(input_dir) if f.is_dir() and os.path.basename(f.path) != wt_folder_name]
+    print("=== Step 2: Calculating Differential Maps (Aggregation Phase) ===")
     
-    for folder in subfolders:
-        sample_name = os.path.basename(folder)
+    sample_folders = []
+    wt_abs_path = os.path.abspath(wt_path)
+    
+    for root, dirs, files in os.walk(input_dir):
+        # Skip WT folder
+        if os.path.abspath(root) == wt_abs_path:
+            continue
+            
+        # Check for tif files
+        has_tif = any(f.endswith('.tif') or f.endswith('.tiff') for f in files)
+        if has_tif:
+            sample_folders.append(root)
+    
+    sample_folders.sort()
+    
+    results = []
+    global_max_val = 0.0
+    
+    for folder in sample_folders:
+        # Create a unique name based on relative path (e.g., Candidates_16-1)
+        rel_path = os.path.relpath(folder, input_dir)
+        sample_name = rel_path.replace(os.path.sep, '_')
+        
         mutant_error_map = get_average_error_map(folder, autoencoder)
         if mutant_error_map is None: continue
         
         # 引き算 (Mutant - WT)
-        # 正の値(Red): WTよりエラーが大きい場所（異常）
-        # 負の値(Blue): WTよりエラーが小さい場所
         diff_map = mutant_error_map - wt_error_map
         
-        # 可視化
+        if normalize:
+            max_diff = np.max(np.abs(diff_map))
+            if max_diff > 0:
+                diff_map = diff_map / max_diff
+                # print(f"  [Info] Normalized diff_map for {sample_name}")
+        
+        results.append((sample_name, diff_map))
+        
+        # Update global max
+        current_max = np.max(np.abs(diff_map))
+        if current_max > global_max_val:
+            global_max_val = current_max
+
+    # Determine final scale
+    if heatmap_range is not None:
+        final_max_val = heatmap_range
+        print(f"Using provided fixed range: +/- {final_max_val}")
+    elif normalize:
+        final_max_val = 1.0
+        print(f"Using normalized range: +/- 1.0")
+    else:
+        final_max_val = global_max_val
+        print(f"Using detected global max range: +/- {final_max_val:.6f}")
+
+    print("=== Step 3: Generating Heatmaps (Visualization Phase) ===")
+    
+    for sample_name, diff_map in results:
         plt.figure(figsize=(15, 6))
         
         # Combined (Red+Green channel average)
         combined_diff = np.mean(diff_map, axis=-1)
-        max_val = np.max(np.abs(combined_diff)) # 0を中心に対称にする
         
         plt.subplot(1, 3, 1)
-        # coolwarm: 赤=プラス(異常), 青=マイナス(正常/消失), 白=変化なし
-        sns.heatmap(combined_diff, cmap='vlag', center=0, vmin=-max_val, vmax=max_val)
-        plt.title(f"{sample_name} - WT\nCombined Difference")
+        sns.heatmap(combined_diff, cmap='PuOr_r', center=0, vmin=-final_max_val, vmax=final_max_val)
+        plt.title(f"{sample_name} - WT\nCombined Difference" + (" (Normalized)" if normalize else ""))
         plt.axis('off')
         
         # Red Ch (Chloroplast)
         plt.subplot(1, 3, 2)
         diff_r = diff_map[..., 0]
-        max_r = np.max(np.abs(diff_r))
-        sns.heatmap(diff_r, cmap='vlag', center=0, vmin=-max_r, vmax=max_r)
+        sns.heatmap(diff_r, cmap='PuOr_r', center=0, vmin=-final_max_val, vmax=final_max_val)
         plt.title("Chloroplast Diff (Red Ch)")
         plt.axis('off')
 
         # Green Ch (Pyrenoid)
         plt.subplot(1, 3, 3)
         diff_g = diff_map[..., 1]
-        max_g = np.max(np.abs(diff_g))
-        sns.heatmap(diff_g, cmap='vlag', center=0, vmin=-max_g, vmax=max_g)
+        sns.heatmap(diff_g, cmap='PuOr_r', center=0, vmin=-final_max_val, vmax=final_max_val)
         plt.title("Pyrenoid Diff (Green Ch)")
         plt.axis('off')
 
@@ -121,6 +161,8 @@ if __name__ == "__main__":
     parser.add_argument('--model_dir', required=True)
     parser.add_argument('--output_dir', default='./results/Differential_Anomalies')
     parser.add_argument('--wt_name', default='WT', help="Name of the WT folder")
+    parser.add_argument('--heatmap_range', type=float, default=None, help="Fixed range for heatmap (e.g., 0.1)")
+    parser.add_argument('--normalize', action='store_true', help="Normalize heatmap values to [-1, 1]")
     args = parser.parse_args()
     
-    visualize_differential(args.input_dir, args.model_dir, args.output_dir, args.wt_name)
+    visualize_differential(args.input_dir, args.model_dir, args.output_dir, args.wt_name, args.heatmap_range, args.normalize)

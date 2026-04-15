@@ -7,7 +7,7 @@ MODEL_DIR="results/Models/Aligned_20260115"
 
 # 解析対象のサンプル群が入っているルートフォルダのパス
 # 例: "data/raw_images/Mutant_Pool" など
-INPUT_DIR="data/aligned_dataset_v5/Mutants"
+INPUT_DIR="data/aligned_dataset_v5/Candidates_01"
 
 # WT（野生型）のデータが入っているフォルダのパス
 # ベースライン計算に使用します
