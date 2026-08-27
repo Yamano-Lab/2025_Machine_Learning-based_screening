@@ -1,4 +1,158 @@
-# [機械学習スクリーニング / ピレノイドの形態解析]
+# English
+
+# Machine Learning Screening / Pyrenoid Morphology Analysis
+
+Author: Kojiro Matsuo
+Date created: December 22, 2025
+
+## 1. File Structure
+
+```text
+ML_based_screening/
+├── data/                     # Storage for training and analysis data
+│   └── raw_images/           # Raw image data
+├── models/                   # Trained model storage
+├── results/                  # Training result output directory
+│   └── vae_vgg_output/       # VAE training results, etc.
+├── screening_results/        # Screening analysis result output directory
+├── src/                      # Python source code (core logic)
+│   ├── __init__.py           # Package initialization (normally does not need editing)
+│   ├── CAE_improved_modeltrain.py  # CAE model training
+│   ├── train_vae_vgg.py      # High-sensitivity VAE model training
+│   ├── train_aligned_cae.py  # CAE training with aligned images
+│   ├── train_dual_channel_cae.py # Two-channel input CAE training
+│   ├── integrated_screening.py     # Screening analysis using a trained model
+│   ├── integrated_screening_aligned.py # Screening analysis of aligned images
+│   ├── create_aligned_dataset_v5.py # Dataset alignment and preprocessing
+│   ├── visualize_average_error.py  # Visualization of mean reconstruction error
+│   ├── refine_anomaly_detector.py  # Retuning anomaly detectors (e.g., OneClassSVM)
+│   ├── inspect_dataset.py          # Dataset inspection and visualization
+│   └── generate_image_only.py      # Image-generation helper
+├── Scripts/                  # Shell scripts for execution (intended for user editing)
+│   ├── align.sh              # Image alignment script
+│   ├── run_train.sh          # Training script
+│   ├── run_train_aligned.sh  # Training script for aligned images
+│   ├── run_train_dual.sh     # Dual-channel CAE training script
+│   ├── run_vae_training.sh   # VAE training script
+│   └── run_analysis.sh       # Analysis script
+├── requirements.txt          # List of required libraries
+├── .gitignore                # Specifies files excluded from Git
+└── README.md                 # Documentation (this file)
+```
+
+## 2. Environment Setup
+
+Please use Anaconda.
+
+```bash
+conda create -n lab_env python=3.9
+conda activate lab_env
+pip install -r requirements.txt
+```
+
+## 3. Usage
+
+1. Open Terminal and navigate to the repository directory.
+
+   ```bash
+   cd Documents/YamanoLab_Scripts_Github/ML_based_screening
+   ```
+
+2. Activate the environment (confirm that `(base)` changes to `(lab_env)`).
+
+   ```bash
+   conda activate lab_env
+   ```
+
+3. Run the program.
+
+   Before running a script, update the path settings in each file under `Scripts/`.
+
+   **Preprocessing**
+
+   Aligns the images and creates the dataset.
+
+   ```bash
+   bash Scripts/align.sh
+   ```
+
+   **To run training:**
+
+   - **Standard Training (CAE)**
+
+     Use this standard method to detect major morphological changes, such as shape deformation.
+
+     ```bash
+     bash Scripts/run_train.sh
+     ```
+
+   - **Aligned CAE Training**
+
+     Trains the model using an aligned dataset.
+
+     ```bash
+     bash Scripts/run_train_aligned.sh
+     ```
+
+   - **Dual-Channel Training**
+
+     Trains the model using two channels (e.g., fluorescence and bright-field images).
+
+     ```bash
+     bash Scripts/run_train_dual.sh
+     ```
+
+   - **High-Sensitivity Training (VAE + VGG)**
+
+     This high-sensitivity method is recommended for detecting subtle differences in texture or internal structure.
+
+     ```bash
+     bash Scripts/run_vae_training.sh
+     ```
+
+   **To run analysis:**
+
+   ```bash
+   bash Scripts/run_analysis.sh
+   ```
+
+---
+
+## 4. Git Update Instructions for macOS (Git Cheat Sheet)
+
+### Step 0: Setup (first time only)
+
+```bash
+# Navigate to any directory, such as the Desktop
+cd ~/Desktop
+
+# Clone the repository
+git clone https://github.com/[username]/ML_based_screening.git
+
+# Enter the repository directory
+cd ML_based_screening
+```
+
+### Step 1: Update Before Starting Work
+
+```bash
+git pull origin main
+```
+
+### Step 2: Save Your Changes After Working
+
+```bash
+git add .
+# Describe your changes in the commit message.
+git commit -m "Describe your changes"
+git push origin main
+```
+
+---
+
+# 日本語版
+
+# 機械学習スクリーニング / ピレノイドの形態解析
 
 作成者: 松尾光治良
 作成日: 2025/12/22
